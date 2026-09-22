@@ -3,7 +3,7 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Boundary, CacheEntry, FlowRow, NodeDetail, ScanDone, ViewPayload } from "./types";
+import type { Boundary, CacheEntry, Endpoint, FlowRow, NodeDetail, ScanDone, Trace, ViewPayload } from "./types";
 
 export const inTauri = isTauri();
 
@@ -27,6 +27,9 @@ export const api = {
   getNode: (id: number) => call<NodeDetail>("get_node", { id }),
   search: (q: string, limit = 30) => call<{ id: number; name: string; path: string; kind: string; lang: string; tags: string[] }[]>("search_nodes", { q, limit }),
   flows: () => call<FlowRow[]>("list_flows"),
+  traces: () => call<Trace[]>("list_traces"),
+  trace: (entry: number) => call<Trace>("get_trace", { entry }),
+  endpoints: () => call<Endpoint[]>("list_endpoints"),
   boundaries: (tag?: string) => call<Boundary[]>("list_boundaries", { tag }),
   recent: () => call<CacheEntry[]>("recent_repos"),
   reportUi: (report: unknown) => call<void>("report_ui", { report }),

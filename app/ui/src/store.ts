@@ -1,7 +1,7 @@
 // Single source of truth for the UI. Panels and the renderer subscribe to it;
 // the bridge reads it to answer `/state`.
 
-import type { EdgeKind, Lang, Level, Stats, ViewEdge, ViewGraph, ViewNode } from "./types";
+import type { EdgeKind, Endpoint, Lang, Level, Stats, Trace, ViewEdge, ViewGraph, ViewNode } from "./types";
 
 export interface Filters {
   langs: Set<Lang>;
@@ -40,7 +40,17 @@ export interface Store {
   layout: LayoutState;
   camera: Camera;
   search: string;
-  shelfTab: "packages" | "flows" | "boundaries";
+  shelfTab: "traces" | "endpoints" | "packages" | "boundaries";
+  /** Which view fills the window: the trace diagram or the force-directed map. */
+  stage: "traces" | "map";
+  traces: Trace[];
+  endpoints: Endpoint[];
+  /** The trace on stage (and highlighted on the map). */
+  trace: Trace | null;
+  /** View node ids on the map that the current trace passes through. */
+  traceIds: Set<number>;
+  /** Light the trace up on the map (after "Show on map"), dimming everything else. */
+  traceOnMap: boolean;
   shelfOpen: boolean;
   bridgePort: number | null;
   scanning: string | null;
@@ -60,18 +70,24 @@ export const store: Store = {
   selection: null,
   hover: null,
   neighbourIds: new Set(),
-  filters: { langs: new Set(["rust", "typescript", "javascript", "python", "go", "other"]), edges: new Set(["imports", "calls", "flow"]), tag: "", externals: true },
+  filters: { langs: new Set(["rust", "typescript", "javascript", "python", "go", "other"]), edges: new Set(["imports", "calls", "flow"]), tag: "", externals: false },
   layout: { running: false, backend: "", iteration: 0, energy: 0 },
   camera: { x: 0, y: 0, zoom: 1 },
   search: "",
-  shelfTab: "packages",
+  shelfTab: "traces",
+  stage: "traces",
+  traces: [],
+  endpoints: [],
+  trace: null,
+  traceIds: new Set(),
+  traceOnMap: false,
   shelfOpen: true,
   bridgePort: null,
   scanning: null,
   graphLoaded: false,
 };
 
-type Topic = "graph" | "positions" | "selection" | "hover" | "filters" | "layout" | "camera" | "repo" | "ui";
+type Topic = "graph" | "positions" | "selection" | "hover" | "filters" | "layout" | "camera" | "repo" | "ui" | "trace";
 const listeners = new Map<Topic, Set<() => void>>();
 
 export function subscribe(topic: Topic, fn: () => void): () => void {
@@ -96,8 +112,29 @@ export function setGraph(view: ViewGraph, positions: number[], level: Level, foc
   if (store.selection !== null && !store.index.has(store.selection)) store.selection = null;
   store.hover = null;
   recomputeNeighbours();
+  recomputeTraceIds();
   emit("graph");
   emit("selection");
+}
+
+/** Put a trace on stage (or clear it) and work out which map nodes it touches. */
+export function setTrace(t: Trace | null): void {
+  store.trace = t;
+  recomputeTraceIds();
+  emit("trace");
+}
+
+function recomputeTraceIds(): void {
+  store.traceIds = new Set();
+  const t = store.trace;
+  if (!t) return;
+  // A step is a symbol; at the file or package level it lands on its file or package.
+  const byPath = new Map(store.nodes.map((n) => [n.path, n.id]));
+  const byGroupName = new Map(store.nodes.filter((n) => n.kind === "package").map((n) => [n.name, n.id]));
+  for (const s of t.steps) {
+    const id = byPath.get(s.path) ?? byPath.get(s.path.split("#")[0]) ?? byGroupName.get(s.lane);
+    if (id !== undefined) store.traceIds.add(id);
+  }
 }
 
 export function setPositions(flat: number[], generation: number): boolean {
@@ -161,6 +198,11 @@ export function snapshot(): Record<string, unknown> {
     layout: { ...s.layout },
     filters: { langs: [...s.filters.langs], edges: [...s.filters.edges], tag: s.filters.tag, externals: s.filters.externals },
     search: s.search,
+    stage: s.stage,
+    trace: s.trace?.entry_path ?? null,
+    trace_steps: s.trace?.steps.length ?? 0,
+    trace_on_map: s.traceOnMap,
+    trace_nodes: s.traceIds.size,
     panels: { shelf: s.shelfOpen, shelf_tab: s.shelfTab, card: s.selection !== null, empty: !s.graphLoaded, scanning: s.scanning !== null },
     nodes_visible: s.nodes.filter(nodeVisible).length,
     edges_visible: s.edges.filter((e) => s.filters.edges.has(e.kind)).length,

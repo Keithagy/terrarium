@@ -7,6 +7,7 @@ import { store, subscribe, emit, select, setGraph, setPositions, setHover, snaps
 import { Renderer } from "./renderer";
 import { initPanels, refreshRecent, renderFps, toast, toggleHelp, type Actions } from "./panels";
 import { initBridge } from "./bridge";
+import { initTraces, loadTraces, setStage, stepTrace } from "./traces";
 import type { LayoutTick, ScanDone, ViewPayload } from "./types";
 
 const canvas = document.getElementById("gl") as HTMLCanvasElement;
@@ -51,11 +52,13 @@ const actions: Actions = {
     await scan(path, false);
   },
   async setLevel(level, focus = null) {
+    setStage("map");
     if (level === store.level && focus === store.focus && store.graphLoaded) return;
     firstLoad = firstLoad || level !== store.level;
     await loadView(level, focus);
   },
   async focusNode(id) {
+    setStage("map");
     const i = store.index.get(id);
     const n = i !== undefined ? store.nodes[i] : null;
     if (!n) return;
@@ -102,6 +105,7 @@ async function scan(path: string, fresh: boolean): Promise<void> {
     firstLoad = true;
     select(null);
     await loadView("file", null);
+    await loadTraces(true);
     toast(done.from_cache ? `Opened ${done.stats.files} files from cache. Press R to rescan.` : `Scanned ${done.stats.files} files, ${done.stats.flows} flows`, "ok");
     void refreshRecent();
   } catch (e) {
@@ -216,10 +220,14 @@ window.addEventListener("keydown", (e) => {
   if (inInput) return;
   switch (e.key) {
     case "/": e.preventDefault(); (document.getElementById("search") as HTMLInputElement).focus(); break;
+    case "t": case "T": setStage("traces"); break;
+    case "m": case "M": setStage("map"); break;
+    case "j": case "J": stepTrace(1); break;
+    case "k": case "K": stepTrace(-1); break;
     case "1": void actions.setLevel("package"); break;
     case "2": void actions.setLevel("file"); break;
     case "3": void actions.setLevel("symbol"); break;
-    case "f": case "F": renderer.fit(); break;
+    case "f": case "F": if (store.stage === "map") renderer.fit(); break;
     case "l": case "L": actions.relayout(); break;
     case "r": case "R": if (store.repo) void scan(store.repo, true); break;
     case "?": toggleHelp(); break;
@@ -248,7 +256,7 @@ void on<ScanDone>("scan:done", () => {
     store.scanning = null;
     firstLoad = true;
     select(null);
-    void loadView("file", null);
+    void loadView("file", null).then(() => loadTraces(true));
   }
 });
 
@@ -264,11 +272,11 @@ let lastReport = "";
 setInterval(() => {
   if (!inTauri) return;
   const snap = snapshot();
-  const key = JSON.stringify([snap.selection, snap.level, snap.focus, snap.hover, snap.camera, snap.filters, snap.panels, snap.graph_loaded]);
+  const key = JSON.stringify([snap.selection, snap.level, snap.focus, snap.hover, snap.camera, snap.filters, snap.panels, snap.graph_loaded, snap.stage, snap.trace]);
   if (key !== lastReport) {
     lastReport = key;
-    const { camera, selection, hover, level, focus, graph_loaded, search, filters, panels, nodes_visible, edges_visible, ts } = snap as Record<string, never>;
-    void api.reportUi({ camera, selection, hover, level, focus, graph_loaded, search, filters, panels, nodes_visible, edges_visible, ts }).catch(() => {});
+    const { camera, selection, hover, level, focus, graph_loaded, search, filters, panels, nodes_visible, edges_visible, stage, trace, ts } = snap as Record<string, never>;
+    void api.reportUi({ camera, selection, hover, level, focus, graph_loaded, search, filters, panels, nodes_visible, edges_visible, stage, trace, ts }).catch(() => {});
   }
 }, 500);
 setInterval(() => {
@@ -280,6 +288,15 @@ setInterval(() => {
 // ---- boot ----------------------------------------------------------------------
 
 initPanels(actions);
+initTraces({
+  showOnMap() {
+    select(null);
+    store.traceOnMap = true;
+    setStage("map");
+    emit("trace");
+    renderer.fit();
+  },
+});
 initBridge(renderer, actions);
 
 (async () => {

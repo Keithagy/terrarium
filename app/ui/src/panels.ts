@@ -1,9 +1,10 @@
-// DOM panels: shelf (search, packages, flows, boundaries, legend), specimen
+// DOM panels: shelf (search, packages, boundaries, legend; traces live in traces.ts), specimen
 // card (selected node), bench (status strip), overlays and toasts.
 
 import { api, log } from "./tauri";
-import { store, subscribe, emit, select, nodeVisible } from "./store";
-import { LANG_LABEL, type Boundary, type FlowRow, type Lang, type NodeDetail, type ViewNode } from "./types";
+import { store, subscribe, emit, select, nodeVisible, setTrace } from "./store";
+import { LANG_LABEL, type Boundary, type Lang, type NodeDetail, type ViewNode } from "./types";
+import { setStage, traceFrom } from "./traces";
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T;
 
@@ -34,7 +35,8 @@ export function initPanels(a: Actions): void {
   initBench();
   initEmpty();
   initHelp();
-  subscribe("graph", () => { renderPackages(); renderLegend(); renderBench(); void renderFlows(); void renderBoundaries(); });
+  subscribe("graph", () => { renderPackages(); renderLegend(); renderBench(); void renderBoundaries(); });
+  subscribe("trace", renderLegend);
   subscribe("filters", () => { renderLegend(); renderPackages(); });
   subscribe("selection", () => { void renderCard(); renderPackages(); });
   subscribe("layout", renderBench);
@@ -97,6 +99,8 @@ function initShelf(): void {
       document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("is-active", t === tab));
       document.querySelectorAll<HTMLElement>(".tab-panel").forEach((p) => p.classList.toggle("is-active", p.dataset.tabPanel === tab.dataset.tab));
       store.shelfTab = tab.dataset.tab as typeof store.shelfTab;
+      // Traces and endpoints read on the trace stage; packages and boundaries on the map.
+      setStage(store.shelfTab === "traces" || store.shelfTab === "endpoints" ? "traces" : "map");
       emit("ui");
     });
   });
@@ -104,6 +108,7 @@ function initShelf(): void {
 
 /** Select a node that may live at another level: switch level/focus as needed, then centre. */
 export async function jumpTo(id: number): Promise<void> {
+  setStage("map");
   if (store.index.has(id)) {
     select(id);
     actions.centerOn(id);
@@ -167,28 +172,6 @@ function renderPackages(): void {
       more.textContent = `and ${members.length - 401} more`;
       frag.appendChild(more);
     }
-  }
-  el.appendChild(frag);
-}
-
-async function renderFlows(): Promise<void> {
-  const el = $("[data-tab-panel=flows]");
-  el.innerHTML = "";
-  if (!store.graphLoaded) return;
-  let flows: FlowRow[] = [];
-  try { flows = await api.flows(); } catch { return; }
-  if (flows.length === 0) {
-    el.innerHTML = `<div class="group-title">No cross-boundary flows found. Flows appear when an HTTP client and a route, or an IPC call and its handler, share a path.</div>`;
-    return;
-  }
-  const frag = document.createDocumentFragment();
-  for (const f of flows.slice(0, 500)) {
-    const b = document.createElement("button");
-    b.className = "flow-row";
-    b.dataset.testid = `flow-${f.from}-${f.to}`;
-    b.innerHTML = `<span class="end" title="${esc(f.from_path)}"><span class="dot" data-lang="${f.from_lang}"></span> ${esc(short(f.from_path))}</span><span class="via">${esc(f.label)}</span><span class="end" title="${esc(f.to_path)}"><span class="dot" data-lang="${f.to_lang}"></span> ${esc(short(f.to_path))}</span>`;
-    b.addEventListener("click", () => void jumpTo(f.from));
-    frag.appendChild(b);
   }
   el.appendChild(frag);
 }
@@ -270,6 +253,14 @@ function renderLegend(): void {
   ext.innerHTML = `<span class="dot is-external" style="color:var(--fern)"></span>dependencies`;
   ext.addEventListener("click", () => { store.filters.externals = !store.filters.externals; emit("filters"); });
   el.appendChild(ext);
+  if (store.trace && store.traceOnMap) {
+    const t = document.createElement("button");
+    t.dataset.testid = "clear-trace";
+    t.title = "Stop highlighting this trace";
+    t.innerHTML = `<span class="chip is-boundary">trace ${esc(store.trace.name)} ×</span>`;
+    t.addEventListener("click", () => { store.traceOnMap = false; setTrace(store.trace); });
+    el.appendChild(t);
+  }
   if (store.filters.tag) {
     const t = document.createElement("button");
     t.dataset.testid = "clear-tag";
@@ -303,6 +294,8 @@ async function renderCard(): Promise<void> {
     <div class="card-actions">
       ${n.external ? "" : `<button class="ghost" data-testid="open-file">Open in editor</button>`}
       ${d.children.length && n.kind !== "symbol" ? `<button class="ghost" data-testid="expand">Show ${d.children.length} inside</button>` : ""}
+      ${n.external || n.kind === "package" ? "" : `<button class="ghost" data-testid="trace-from" title="Follow the calls from here across every boundary">Trace from here</button>`}
+      ${store.stage === "traces" ? `<button class="ghost" data-testid="card-show-map">Show on map</button>` : ""}
     </div>
     <div class="card-facts">
       <span>Lines</span><b>${n.loc.toLocaleString()}</b>
@@ -317,7 +310,13 @@ async function renderCard(): Promise<void> {
   card.querySelector("[data-testid=card-close]")!.addEventListener("click", () => select(null));
   card.querySelector("[data-testid=open-file]")?.addEventListener("click", () => void api.openPath(n.path, n.span?.[0]).catch((e) => toast(`Cannot open: ${String(e)}`, "error")));
   card.querySelector("[data-testid=expand]")?.addEventListener("click", () => void actions.focusNode(n.id));
-  card.querySelectorAll<HTMLButtonElement>("[data-jump]").forEach((b) => b.addEventListener("click", () => void jumpTo(Number(b.dataset.jump))));
+  card.querySelector("[data-testid=trace-from]")?.addEventListener("click", () => void traceFrom(n.id));
+  card.querySelector("[data-testid=card-show-map]")?.addEventListener("click", () => void jumpTo(n.id));
+  // On the trace stage, neighbours open in the card so the diagram stays put.
+  card.querySelectorAll<HTMLButtonElement>("[data-jump]").forEach((b) => b.addEventListener("click", () => {
+    const id = Number(b.dataset.jump);
+    if (store.stage === "traces") select(id); else void jumpTo(id);
+  }));
 }
 
 // ---- bench ------------------------------------------------------------------

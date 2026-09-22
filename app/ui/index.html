@@ -17,21 +17,29 @@
         <ul id="search-results" data-testid="search-results" hidden></ul>
       </div>
       <nav class="tabs" role="tablist">
-        <button class="tab is-active" data-tab="packages" data-testid="tab-packages" role="tab">Packages</button>
-        <button class="tab" data-tab="flows" data-testid="tab-flows" role="tab">Flows</button>
+        <button class="tab is-active" data-tab="traces" data-testid="tab-traces" role="tab">Traces</button>
+        <button class="tab" data-tab="endpoints" data-testid="tab-endpoints" role="tab">Endpoints</button>
+        <button class="tab" data-tab="packages" data-testid="tab-packages" role="tab">Packages</button>
         <button class="tab" data-tab="boundaries" data-testid="tab-boundaries" role="tab">Boundaries</button>
       </nav>
-      <section class="tab-panel is-active" data-tab-panel="packages" data-testid="packages"></section>
-      <section class="tab-panel" data-tab-panel="flows" data-testid="flows"></section>
+      <section class="tab-panel is-active" data-tab-panel="traces" data-testid="traces"></section>
+      <section class="tab-panel" data-tab-panel="endpoints" data-testid="endpoints"></section>
+      <section class="tab-panel" data-tab-panel="packages" data-testid="packages"></section>
       <section class="tab-panel" data-tab-panel="boundaries" data-testid="boundaries"></section>
       <footer class="legend" data-testid="legend"></footer>
     </aside>
+
+    <main id="trace-view" data-testid="trace-view" data-panel="trace" hidden></main>
 
     <aside id="card" data-testid="card" data-panel="card" hidden></aside>
 
     <footer id="bench" data-testid="bench" data-panel="bench">
       <button id="repo-name" class="bench-repo" data-testid="repo-name" title="Open another repository">No repository</button>
-      <div class="segmented" role="group" aria-label="Level">
+      <div class="segmented" role="group" aria-label="View">
+        <button data-stage="traces" data-testid="stage-traces" class="is-active" title="End-to-end traces (T)">Traces</button>
+        <button data-stage="map" data-testid="stage-map" title="Force-directed map (M)">Map</button>
+      </div>
+      <div class="segmented" id="levels" role="group" aria-label="Level">
         <button data-level="package" data-testid="level-package">Packages</button>
         <button data-level="file" data-testid="level-file" class="is-active">Files</button>
         <button data-level="symbol" data-testid="level-symbol">Symbols</button>
@@ -67,7 +75,7 @@
         </svg>
       </div>
       <h1>A quiet place to watch a codebase</h1>
-      <p>Open a repository and Terrarium grows a map of its packages, files and symbols, with the data flows between languages lit up.</p>
+      <p>Open a repository and Terrarium follows each request from where it starts, across every language it passes through, to where the data comes to rest.</p>
       <div class="empty-actions">
         <button id="open-btn" class="primary" data-testid="open-repo">Open a repository</button>
         <span class="hint">or drop a folder here</span>
@@ -87,7 +95,9 @@
         <dl class="keys">
           <dt>⌘O</dt><dd>Open a repository</dd>
           <dt>/</dt><dd>Search</dd>
-          <dt>1 2 3</dt><dd>Packages, files, symbols</dd>
+          <dt>T · M</dt><dd>Traces, map</dd>
+          <dt>J K</dt><dd>Next, previous trace</dd>
+          <dt>1 2 3</dt><dd>Packages, files, symbols on the map</dd>
           <dt>F</dt><dd>Fit everything in view</dd>
           <dt>L</dt><dd>Settle the layout again</dd>
           <dt>Esc</dt><dd>Clear selection</dd>

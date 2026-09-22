@@ -50,7 +50,10 @@ scripts/dev.sh
 ```sh
 terrarium                          # home: repo state, app status, next steps
 terrarium scan .                   # scan and cache the graph
-terrarium flows                    # cross-language data flows
+terrarium traces                   # end-to-end paths: entry → calls → boundaries → db/fs/queue
+terrarium trace web/src/app.ts#main  # one trace as a call tree
+terrarium endpoints --gaps         # routes nothing calls, calls nothing serves
+terrarium flows                    # the raw cross-language flow edges
 terrarium hotspots                 # most connected files
 terrarium boundaries --tag db      # everything touching a database
 terrarium show src/api.ts          # one node with neighbours and tags

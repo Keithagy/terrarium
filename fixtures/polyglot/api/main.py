@@ -22,3 +22,8 @@ def post_user(payload: dict):
 @app.get("/api/users/{user_id}")
 def get_user(user_id: int):
     return list_users(only=user_id)
+
+
+@app.get("/api/health")
+def health():
+    return {"ok": True}

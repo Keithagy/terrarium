@@ -82,6 +82,30 @@ enum Cmd {
         #[arg(long, default_value_t = 200)]
         limit: usize,
     },
+    /// End-to-end request paths: entry point → calls → every boundary crossed → sinks (db, fs, queue).
+    Traces {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Only traces that reach a language, e.g. `go`.
+        #[arg(long)]
+        lang: Option<String>,
+    },
+    /// One trace as a call tree, starting at a node (id or path). Examples:
+    /// `terrarium trace web/src/app.ts#main`, `terrarium trace fetchUsers --full`.
+    Trace {
+        node: String,
+        /// Show every step instead of the first 60.
+        #[arg(long)]
+        full: bool,
+    },
+    /// Contracts between callers and handlers (HTTP routes, IPC commands, queue topics), gaps first.
+    Endpoints {
+        /// Only endpoints with no callers or no handler in the repository.
+        #[arg(long)]
+        gaps: bool,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+    },
     /// Nodes that touch the outside world (http, db, fs, env, ipc, queue, process).
     Boundaries {
         /// Tag prefix filter, e.g. `db`, `http`, `env:DATABASE_URL`.
@@ -517,6 +541,94 @@ fn run(cli: Cli) -> Result<Value> {
             }
             Ok(v)
         }
+        Some(Cmd::Traces { limit, lang }) => {
+            let g = load_graph(&root)?;
+            let mut traces = query::traces(&g);
+            if let Some(l) = &lang {
+                traces.retain(|t| t.langs.iter().any(|x| x.label() == l.as_str()));
+            }
+            if traces.is_empty() {
+                return Ok(json!({
+                    "traces": format!("0 traces cross a boundary{}", lang.map(|l| format!(" into {l}")).unwrap_or_default()),
+                    "help": ["Run `terrarium endpoints` to see routes and calls that did not pair up"]
+                }));
+            }
+            let total = traces.len();
+            let rows: Vec<Value> = traces.iter().take(limit).map(|t| json!({
+                "entry": t.entry_path,
+                "hops": t.hops,
+                "langs": t.langs.iter().map(|l| l.label()).collect::<Vec<_>>().join(">"),
+                "via": t.via.join(" "),
+            })).collect();
+            let mut help = vec!["Run `terrarium trace <entry>` for the call tree".to_string()];
+            if total > limit {
+                help.push(format!("Run `terrarium traces --limit {total}` for all"));
+            }
+            Ok(json!({ "count": format!("{} of {total} total", rows.len()), "traces": rows, "help": help }))
+        }
+        Some(Cmd::Trace { node, full }) => {
+            let g = load_graph(&root)?;
+            let id = resolve_node(&g, &node)?;
+            let Some(t) = query::trace_from(&g, id) else {
+                return Ok(json!({
+                    "trace": format!("{} crosses no boundary", g.node(id).path),
+                    "help": ["Run `terrarium traces` to list entry points that do"]
+                }));
+            };
+            let total = t.steps.len();
+            let shown = if full { total } else { total.min(60) };
+            let steps: Vec<Value> = t.steps.iter().take(shown).map(|s| json!({
+                "depth": s.depth,
+                "at": match s.line { Some(l) => format!("{}:{l}", s.path), None => s.path.clone() },
+                "via": match (&s.via, &s.label) {
+                    (Some(terrarium_core::EdgeKind::Flow), Some(l)) => l.clone(),
+                    (None, _) => "entry".into(),
+                    _ => if s.repeat { "call (seen above)".into() } else { "call".into() },
+                },
+                "sinks": s.sinks.join(" "),
+            })).collect();
+            let mut v = json!({
+                "entry": t.entry_path,
+                "hops": t.hops,
+                "langs": t.langs.iter().map(|l| l.label()).collect::<Vec<_>>().join(">"),
+                "lanes": t.lanes.join(" "),
+                "sinks": if t.sinks.is_empty() { "none".to_string() } else { t.sinks.join(" ") },
+                "count": format!("{shown} of {total} steps"),
+                "steps": steps,
+            });
+            if shown < total {
+                v["help"] = json!([format!("Run `terrarium trace {} --full` for all {total} steps", t.entry_path)]);
+            } else if t.truncated {
+                v["help"] = json!(["Trace stopped at 300 steps or depth 24; run `terrarium trace <deeper node>` to continue"]);
+            }
+            Ok(v)
+        }
+        Some(Cmd::Endpoints { gaps, limit }) => {
+            let g = load_graph(&root)?;
+            let all = query::endpoints(&g);
+            let gap_count = all.iter().filter(|e| e.status != "ok").count();
+            let eps: Vec<&query::Endpoint> = all.iter().filter(|e| !gaps || e.status != "ok").collect();
+            if eps.is_empty() {
+                return Ok(json!({ "endpoints": if gaps { "0 gaps: every route and call pairs up" } else { "0 endpoints found" } }));
+            }
+            let short = |v: &[query::EndpointRef]| v.iter().map(|r| r.path.clone()).collect::<Vec<_>>().join(" ");
+            let total = eps.len();
+            let rows: Vec<Value> = eps.iter().take(limit).map(|e| json!({
+                "key": e.key,
+                "status": e.status,
+                "handlers": short(&e.handlers),
+                "callers": short(&e.callers),
+            })).collect();
+            let mut help = vec!["Run `terrarium trace <caller>` to follow a call end to end".to_string()];
+            if total > limit {
+                help.push(format!("Run `terrarium endpoints --limit {total}` for all"));
+            }
+            Ok(json!({
+                "count": format!("{} of {total} total, {gap_count} gaps", rows.len()),
+                "endpoints": rows,
+                "help": help,
+            }))
+        }
         Some(Cmd::Boundaries { tag, limit }) => {
             let g = load_graph(&root)?;
             let b = query::boundaries(&g, tag.as_deref());
@@ -682,7 +794,8 @@ fn home(root: &Path) -> Result<Value> {
     if v["repo"].is_string() {
         help.push("Run `terrarium scan` to analyse this repository".to_string());
     } else {
-        help.push("Run `terrarium flows` for cross-language data flows".to_string());
+        help.push("Run `terrarium traces` for end-to-end paths across languages".to_string());
+        help.push("Run `terrarium endpoints --gaps` for routes nobody calls and calls nobody serves".to_string());
         help.push(
             "Run `terrarium hotspots` / `terrarium boundaries` / `terrarium cycles`".to_string(),
         );

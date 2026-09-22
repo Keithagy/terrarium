@@ -37,6 +37,9 @@ grep -E "^test result" "$OUT/test.log"
 step "cli scan"
 expect "scan" "^flows: 5" "$T" scan fixtures/polyglot
 expect "flows" "ipc scan_repo" "$T" --repo fixtures/polyglot flows
+expect "traces" "app.ts#main,4,typescript>python>rust>go" "$T" --repo fixtures/polyglot traces
+expect "trace" "store.go#open:13\",call,db" "$T" --repo fixtures/polyglot trace web/src/app.ts#main
+expect "endpoints" "api/reports,no-handler" "$T" --repo fixtures/polyglot endpoints --gaps
 expect "layout" "^backend: (gpu|cpu)" "$T" --repo fixtures/polyglot layout --backend auto --iterations 50
 grep -q "^backend: gpu" "$OUT/layout.toon" || echo "   (auto picked cpu for this small graph; gpu path covered by the layout crate's tests)"
 
@@ -44,6 +47,13 @@ step "launch app"
 "$T" app quit >/dev/null 2>&1
 sleep 0.5
 expect "launch" "graph_loaded: true" "$T" app launch fixtures/polyglot
+
+step "trace stage"
+sleep 0.5
+expect "stage" "stage: traces" "$T" app state
+expect "trace ui" "Crosses 4 boundaries through TypeScript, Python, Rust and Go" "$T" app ui
+expect "endpoint" "trace: native/src/lib.rs#run|trace: web/src/app.ts#main" "$T" app click "endpoint-http /api/jobs"
+expect "show on map" "stage: map" "$T" app click trace-show-map
 
 step "bridge checks"
 expect "select" "selection_path: web/src/api.ts" "$T" app select web/src/api.ts

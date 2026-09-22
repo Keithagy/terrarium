@@ -99,6 +99,49 @@ export interface FlowRow {
   label: string;
 }
 
+export interface TraceStep {
+  id: number;
+  name: string;
+  path: string;
+  lang: Lang;
+  lane: string;
+  depth: number;
+  parent?: number;
+  via?: "calls" | "flow";
+  label?: string;
+  sinks?: string[];
+  line?: number;
+  repeat?: boolean;
+}
+
+export interface Trace {
+  entry: number;
+  entry_path: string;
+  name: string;
+  hops: number;
+  langs: Lang[];
+  lanes: string[];
+  via: string[];
+  sinks: string[];
+  truncated: boolean;
+  steps: TraceStep[];
+}
+
+export interface EndpointRef {
+  id: number;
+  name: string;
+  path: string;
+  lang: Lang;
+}
+
+export interface Endpoint {
+  key: string;
+  kind: "http" | "ipc" | "queue";
+  status: "ok" | "no-callers" | "no-handler";
+  handlers: EndpointRef[];
+  callers: EndpointRef[];
+}
+
 export interface Boundary {
   id: number;
   name: string;

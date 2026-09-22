@@ -312,6 +312,29 @@ pub fn list_flows(state: State<'_, Arc<AppState>>) -> Res<Vec<query::FlowRow>> {
 }
 
 #[tauri::command]
+pub fn list_traces(state: State<'_, Arc<AppState>>) -> Res<Vec<query::Trace>> {
+    let g = state.graph().ok_or("no repository loaded")?;
+    let mut t = query::traces(&g);
+    t.truncate(500);
+    Ok(t)
+}
+
+#[tauri::command]
+pub fn get_trace(state: State<'_, Arc<AppState>>, entry: NodeId) -> Res<query::Trace> {
+    let g = state.graph().ok_or("no repository loaded")?;
+    if entry as usize >= g.nodes.len() {
+        return Err(format!("no node with id {entry}"));
+    }
+    query::trace_from(&g, entry).ok_or_else(|| format!("{} crosses no boundary", g.node(entry).path))
+}
+
+#[tauri::command]
+pub fn list_endpoints(state: State<'_, Arc<AppState>>) -> Res<Vec<query::Endpoint>> {
+    let g = state.graph().ok_or("no repository loaded")?;
+    Ok(query::endpoints(&g))
+}
+
+#[tauri::command]
 pub fn list_boundaries(
     state: State<'_, Arc<AppState>>,
     tag: Option<String>,

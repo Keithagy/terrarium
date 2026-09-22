@@ -42,6 +42,26 @@ strip, status and mode). Everything left-aligned.
 └────────────────────────────────────────────────────────────────┘
 ```
 
+Two stages fill the space behind the panels. **Traces** (the default when a repository
+has any) follows one request from its entry point to where its data comes to rest: one
+lane per package, one row per step in call order, calls as quiet fern connectors and
+each boundary crossing as an amber line into the next lane, labelled with its route or
+command. Position means something here — left to right is who hands data to whom, top to
+bottom is call order — which the force-directed **map** cannot say. The map stays for
+the shape of the whole repository, and "Show on map" lights a trace up on it.
+
+```
+│ ┌ shelf ─────┐  main  web/src/app.ts                            │
+│ │ traces     │  Crosses 4 boundaries through TypeScript, …      │
+│ │ endpoints  │  polyglot-web     polyglot-api     worker        │
+│ │ packages   │  [main]                                          │
+│ │ boundaries │   └[fetchUsers]──http /api/users──▶[get_users]   │
+│ └────────────┘                                     └[list_users db]
+```
+
+The Endpoints tab is the contract check: routes nothing in the repository calls, and
+calls nothing in the repository serves, sorted first.
+
 ## Principles
 
 - The graph is the hero. Panels are translucent and quiet; nothing on them glows.

@@ -56,7 +56,9 @@ terrarium app reset
 ```
 
 Every `data-testid` in the UI is listed by `terrarium app ui`. Stable ones:
-`search`, `tab-packages|flows|boundaries`, `level-package|file|symbol`, `lang-<lang>`,
+`search`, `tab-traces|endpoints|packages|boundaries`, `stage-traces|map`,
+`trace-<entry id>`, `step-<index>`, `trace-show-map`, `trace-from`, `clear-trace`,
+`endpoint-<key>` (e.g. `endpoint-http /api/users`), `level-package|file|symbol`, `lang-<lang>`,
 `edge-imports|calls|flow`, `toggle-externals`, `node-<id>`, `flow-<from>-<to>`,
 `card`, `card-title`, `card-path`, `card-close`, `open-file`, `expand`, `nb-<id>`,
 `layout-status`, `bridge`, `open-repo`, `recent-repo`, `toast`.

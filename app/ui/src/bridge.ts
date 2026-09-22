@@ -61,8 +61,10 @@ export function initBridge(renderer: Renderer, actions: Actions): void {
       store.filters.langs = new Set(["rust", "typescript", "javascript", "python", "go", "other"]);
       store.filters.edges = new Set(["imports", "calls", "flow"]);
       store.filters.tag = "";
-      store.filters.externals = true;
+      store.filters.externals = false;
+      store.traceOnMap = false;
       emit("filters");
+      emit("trace");
       renderer.fit();
       return snapshot();
     },

@@ -228,3 +228,69 @@ fn one_external_node_per_dependency() {
             .all(|n| n.group_name == "dependencies")
     );
 }
+
+#[test]
+fn traces_stitch_calls_and_flows_across_languages() {
+    let g = scan(&fixture(), &ScanOptions::default()).unwrap();
+    let traces = query::traces(&g);
+    let by_entry = |p: &str| traces.iter().find(|t| t.entry_path == p);
+
+    // web main → scanRepo ─ipc→ rust scan_repo → sync_jobs → fetch_all ─http→ go handleJobs → ListJobs → open (db)
+    let t = by_entry("web/src/app.ts#main").expect("trace from app.ts#main");
+    assert_eq!(t.hops, 4, "{:#?}", t.steps.iter().map(|s| &s.path).collect::<Vec<_>>());
+    assert_eq!(
+        t.langs,
+        vec![
+            terrarium_core::Lang::TypeScript,
+            terrarium_core::Lang::Python,
+            terrarium_core::Lang::Rust,
+            terrarium_core::Lang::Go
+        ]
+    );
+    let paths: Vec<&str> = t.steps.iter().map(|s| s.path.as_str()).collect();
+    assert!(!paths.contains(&"web/src/view.ts#render"), "branches without a flow or sink are pruned");
+    let open = t.steps.iter().find(|s| s.path == "worker/store/store.go#open").expect("reaches the go store");
+    assert!(open.sinks.contains(&"db".to_string()));
+    let handle = t.steps.iter().find(|s| s.path == "worker/main.go#handleJobs").unwrap();
+    assert_eq!(handle.via, Some(EdgeKind::Flow));
+    assert_eq!(handle.label.as_deref(), Some("http /api/jobs"));
+    // parents always come before children, so the list reads as a tree top to bottom
+    for (i, s) in t.steps.iter().enumerate() {
+        if let Some(p) = s.parent {
+            assert!(p < i);
+            assert_eq!(t.steps[p].depth + 1, s.depth);
+        }
+    }
+
+    // an HTTP client nobody calls is its own entry
+    assert!(by_entry("web/src/api.ts#fetchUser").is_some());
+    // the rust entry point reaches go
+    assert_eq!(by_entry("native/src/lib.rs#run").map(|t| t.hops), Some(1));
+    // callees are never entries
+    assert!(by_entry("web/src/api.ts#fetchUsers").is_none());
+    assert!(traces.iter().all(|t| t.hops > 0));
+}
+
+#[test]
+fn endpoints_report_callers_and_gaps() {
+    let g = scan(&fixture(), &ScanOptions::default()).unwrap();
+    let eps = query::endpoints(&g);
+    let find = |k: &str| eps.iter().find(|e| e.key == k).unwrap_or_else(|| panic!("no endpoint {k}: {:?}", eps.iter().map(|e| &e.key).collect::<Vec<_>>()));
+    let users = find("http /api/users");
+    assert_eq!(users.status, "ok");
+    assert_eq!(users.handlers.len(), 2, "GET and POST handlers share the route");
+    assert_eq!(users.callers.len(), 1);
+    let jobs = find("http /api/jobs");
+    assert_eq!(jobs.handlers.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(), vec!["worker/main.go#handleJobs"]);
+    assert_eq!(find("ipc scan_repo").status, "ok");
+    // fetchUser has no caller inside the repo, but the route itself is served
+    assert_eq!(find("http /api/users/*").status, "ok");
+    // a route nothing in the repo calls, and a call nothing in the repo serves
+    let health = find("http /api/health");
+    assert_eq!((health.status, health.callers.len()), ("no-callers", 0));
+    let reports = find("http /api/reports");
+    assert_eq!((reports.status, reports.handlers.len()), ("no-handler", 0));
+    assert_eq!(reports.callers[0].path, "web/src/api.ts#fetchReport");
+    // gaps sort first: they are what needs attention
+    assert_ne!(eps[0].status, "ok");
+}

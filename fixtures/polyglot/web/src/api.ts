@@ -13,3 +13,8 @@ export async function fetchUser(id: number): Promise<User> {
 }
 
 export const scanRepo = (path: string) => invoke<string>("scan_repo", { path });
+
+export async function fetchReport(): Promise<unknown> {
+  const res = await fetch("/api/reports");
+  return res.json();
+}

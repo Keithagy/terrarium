@@ -24,7 +24,8 @@ out float v_px;
 out float v_flags;
 void main() {
   float zoom = u_view.z;
-  float r = clamp(a_radius * zoom, 2.5, 64.0);
+  // state 5 is hidden by a filter: collapse it rather than clamping it to a dot
+  float r = a_state == 5.0 ? 0.0 : clamp(a_radius * zoom, 2.5, 64.0);
   float margin = (a_state == 2.0 || a_state == 1.0) ? 3.2 : 1.6;
   v_px = r;
   vec2 screen = (a_pos - u_view.xy) * zoom + u_res * 0.5;
@@ -263,6 +264,7 @@ export class Renderer {
     subscribe("positions", () => { this.dirtyPositions = true; this.requestRender(); });
     subscribe("selection", () => { this.dirtyState = true; this.requestRender(); });
     subscribe("hover", () => { this.dirtyState = true; this.requestRender(); });
+    subscribe("trace", () => { this.dirtyState = true; this.requestRender(); });
     subscribe("camera", () => this.requestRender());
     subscribe("layout", () => this.requestRender());
     this.resize();
@@ -443,10 +445,12 @@ export class Renderer {
     const sel = store.selection;
     const hov = store.hover;
     const hasSel = sel !== null;
+    const tr = store.trace && store.traceOnMap ? store.traceIds : null;
     for (let i = 0; i < this.nodeCount; i++) {
       const id = store.nodes[i].id;
       let s = 0;
       if (hasSel) s = id === sel ? 2 : store.neighbourIds.has(id) ? 4 : 3;
+      else if (tr) s = tr.has(id) ? 4 : 3;
       if (id === hov && id !== sel) s = 1;
       if (!this.visible[i]) s = 5; // hidden: radius 0 below
       this.nodeData[i * 8 + 6] = s;
@@ -457,6 +461,7 @@ export class Renderer {
       const b = store.nodes[this.edgePairs[k * 2 + 1]].id;
       let s = 0;
       if (hasSel) s = a === sel || b === sel ? 1 : 3;
+      else if (tr) s = tr.has(a) && tr.has(b) ? 1 : 3;
       else if (hov !== null && (a === hov || b === hov)) s = 1;
       this.edgeData[k * 10 + 9] = s;
     }
@@ -525,13 +530,14 @@ export class Renderer {
     const pos = store.positions;
     const sel = store.selection;
     const hov = store.hover;
+    const tr = store.trace && store.traceOnMap ? store.traceIds : null;
     // draw priority: selected, hover, neighbours, then big → small
     const order: number[] = [];
     for (let i = 0; i < this.nodeCount; i++) if (this.visible[i]) order.push(i);
     order.sort((a, b) => {
       const ia = store.nodes[a].id, ib = store.nodes[b].id;
-      const pa = ia === sel ? 3 : ia === hov ? 2 : store.neighbourIds.has(ia) ? 1 : 0;
-      const pb = ib === sel ? 3 : ib === hov ? 2 : store.neighbourIds.has(ib) ? 1 : 0;
+      const pa = ia === sel ? 3 : ia === hov ? 2 : store.neighbourIds.has(ia) || tr?.has(ia) ? 1 : 0;
+      const pb = ib === sel ? 3 : ib === hov ? 2 : store.neighbourIds.has(ib) || tr?.has(ib) ? 1 : 0;
       return pb - pa || this.radii[b] - this.radii[a];
     });
     ctx.textBaseline = "middle";
@@ -540,7 +546,7 @@ export class Renderer {
       if (budget <= 0) break;
       const node = store.nodes[i];
       const r = Math.min(Math.max(this.radii[i] * cam.zoom, 2.5), 64);
-      const important = node.id === sel || node.id === hov || store.neighbourIds.has(node.id);
+      const important = node.id === sel || node.id === hov || store.neighbourIds.has(node.id) || (sel === null && !!tr?.has(node.id));
       if (r < 5.5 && !important && (node.kind !== "package" || node.external)) continue;
       const sx = (pos[i * 2] - cam.x) * cam.zoom + this.width / 2;
       const sy = (pos[i * 2 + 1] - cam.y) * cam.zoom + this.height / 2;
@@ -560,7 +566,7 @@ export class Renderer {
       }
       if (!free) continue;
       for (let c = c0; c <= c1; c++) { const k = row * cols + c; if (k >= 0 && k < occupied.length) occupied[k] = 1; }
-      const dim = sel !== null && !important;
+      const dim = (sel !== null || tr !== null) && !important;
       ctx.fillStyle = dim ? "rgba(217,228,218,0.28)" : node.id === sel ? "#F2B950" : isPkg ? "rgba(217,228,218,0.92)" : node.external ? "rgba(143,163,150,0.75)" : "rgba(217,228,218,0.82)";
       ctx.shadowColor = "rgba(10,16,13,0.9)";
       ctx.shadowBlur = 4;

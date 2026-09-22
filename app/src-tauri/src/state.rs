@@ -31,6 +31,12 @@ pub struct UiReport {
     pub panels: Value,
     pub nodes_visible: u32,
     pub edges_visible: u32,
+    /// `traces` or `map`: which stage fills the window.
+    #[serde(default)]
+    pub stage: String,
+    /// Entry path of the trace on stage, if any.
+    #[serde(default)]
+    pub trace: Option<String>,
     pub ts: String,
 }
 
