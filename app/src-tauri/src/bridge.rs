@@ -6,7 +6,7 @@
 //! disable for local experiments. Binds 127.0.0.1 only.
 
 use crate::commands;
-use crate::state::{AppState, level_name};
+use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -92,21 +92,21 @@ fn describe() -> Value {
         "auth": "header x-terrarium-token (see <terrarium home>/bridge.json)",
         "endpoints": [
             { "method": "GET",  "path": "/health",         "summary": "liveness, repo, counts, fps" },
-            { "method": "GET",  "path": "/state",          "summary": "full UI + backend state (selection, camera, level, layout, filters, panels)" },
+            { "method": "GET",  "path": "/state",          "summary": "full UI + backend state (tab, step, view, selection, panels, build summary)" },
             { "method": "POST", "path": "/scan",           "summary": "{path, fresh?} scan or load from cache, then show it" },
-            { "method": "GET",  "path": "/graph",          "summary": "?level=&focus= current view graph with positions" },
+            { "method": "GET",  "path": "/build",          "summary": "the brick model: design, joint check and geometry" },
             { "method": "GET",  "path": "/graph/full",     "summary": "the raw graph (all nodes and edges)" },
             { "method": "GET",  "path": "/node/{id}",      "summary": "node detail with neighbours" },
             { "method": "GET",  "path": "/search",         "summary": "?q=&limit= fuzzy node search" },
             { "method": "GET",  "path": "/flows",          "summary": "cross-language data flows" },
             { "method": "POST", "path": "/select",         "summary": "{node} select by id or path" },
-            { "method": "POST", "path": "/focus",          "summary": "{node} center camera on node and expand it" },
-            { "method": "POST", "path": "/level",          "summary": "{level: package|file|symbol}" },
             { "method": "POST", "path": "/search",         "summary": "{q} type into the search box" },
-            { "method": "POST", "path": "/filter",         "summary": "{langs?, edges?, tag?} visibility filters" },
-            { "method": "POST", "path": "/camera",         "summary": "{x?, y?, zoom?, fit?}" },
-            { "method": "POST", "path": "/layout",         "summary": "{iterations?, backend?} run layout" },
-            { "method": "POST", "path": "/reset",          "summary": "clear selection, filters, camera" },
+            { "method": "POST", "path": "/step",           "summary": "{step} scrub the build to a manual step (1-based; 0 = empty plate, omitted = finished)" },
+            { "method": "POST", "path": "/view",           "summary": "{view?: iso|front|top, spin?, fit?} camera on the model" },
+            { "method": "POST", "path": "/tab",            "summary": "{tab: model|manual|parts|traces|design}" },
+            { "method": "POST", "path": "/design",         "summary": "{model?} have Claude design the manual (one agent per sub-build); blocks until done" },
+            { "method": "POST", "path": "/design/reset",   "summary": "forget Claude's design and use the engine's" },
+            { "method": "POST", "path": "/reset",          "summary": "clear selection and highlights, finished model, fit" },
             { "method": "GET",  "path": "/screenshot",     "summary": "PNG of the window (?format=json for a data URL)" },
             { "method": "GET",  "path": "/ui",             "summary": "semantic snapshot: panels, testids, texts, toasts" },
             { "method": "POST", "path": "/ui/click",       "summary": "{testid} click an element" },
@@ -164,17 +164,17 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/state", get(state))
         .route("/scan", post(scan))
         .route("/open", post(scan))
-        .route("/graph", get(graph))
+        .route("/build", get(build))
         .route("/graph/full", get(graph_full))
         .route("/node/{id}", get(node))
         .route("/search", get(search_get).post(search_post))
         .route("/flows", get(flows))
         .route("/select", post(select))
-        .route("/focus", post(focus))
-        .route("/level", post(level))
-        .route("/filter", post(filter))
-        .route("/camera", post(camera))
-        .route("/layout", post(layout))
+        .route("/step", post(step))
+        .route("/view", post(view))
+        .route("/tab", post(tab))
+        .route("/design", post(design))
+        .route("/design/reset", post(design_reset))
         .route("/reset", post(reset))
         .route("/screenshot", get(screenshot))
         .route("/ui", get(ui))
@@ -192,13 +192,26 @@ pub fn router(ctx: Ctx) -> Router {
 fn backend_state(ctx: &Ctx) -> Value {
     let s = &ctx.state;
     let graph = s.graph();
-    let view = s.view.read().unwrap();
+    let build = s.build();
     json!({
         "repo": graph.as_ref().map(|g| g.root.clone()),
         "scanning": s.scanning.load(Ordering::Relaxed),
+        "designing": s.designing.load(Ordering::Relaxed),
         "stats": graph.as_ref().map(|g| g.stats.clone()),
-        "view": view.as_ref().map(|v| json!({ "level": level_name(v.level), "focus": v.focus, "nodes": v.view.nodes.len(), "edges": v.view.edges.len(), "generation": v.generation })),
-        "layout": *s.layout.lock().unwrap(),
+        "build": build.as_ref().map(|b| json!({
+            "title": b.design.title,
+            "source": b.design.source,
+            "model": b.design.model,
+            "steps": b.check.steps,
+            "pieces": b.check.pieces,
+            "sub_builds": b.check.sub_builds,
+            "joints": b.check.joints,
+            "bridges": b.check.bridges,
+            "weak": b.check.weak.len(),
+            "repairs": b.check.repairs.len(),
+            "studs": b.model.studs,
+            "stale": b.stale,
+        })),
         "ui_last_report": *s.ui.read().unwrap(),
         "uptime_s": s.uptime_s(),
     })
@@ -216,7 +229,7 @@ async fn health(State(ctx): State<Ctx>) -> Json<Value> {
         "nodes": graph.as_ref().map(|g| g.nodes.len()),
         "edges": graph.as_ref().map(|g| g.edges.len()),
         "scanning": s.scanning.load(Ordering::Relaxed),
-        "layout_running": s.layout.lock().unwrap().running,
+        "designing": s.designing.load(Ordering::Relaxed),
         "fps": s.metrics.read().unwrap().fps,
         "errors": s.telemetry.errors.load(Ordering::Relaxed),
     }))
@@ -264,33 +277,9 @@ async fn scan(State(ctx): State<Ctx>, Json(req): Json<ScanReq>) -> ApiResult {
     Ok(Json(v))
 }
 
-#[derive(Deserialize)]
-struct GraphQ {
-    level: Option<String>,
-    focus: Option<u32>,
-}
-
-async fn graph(State(ctx): State<Ctx>, Query(q): Query<GraphQ>) -> ApiResult {
-    if q.level.is_some() || q.focus.is_some() {
-        let level = q.level.clone().unwrap_or_else(|| "file".into());
-        ask_frontend(
-            &ctx,
-            "level",
-            json!({ "level": level, "focus": q.focus }),
-            15000,
-        )
-        .await?;
-    }
-    let view = ctx.state.view.read().unwrap();
-    let Some(v) = view.as_ref() else {
-        return Err(ApiError(
-            StatusCode::NOT_FOUND,
-            "no view; scan a repository first".into(),
-        ));
-    };
-    Ok(Json(
-        json!({ "level": level_name(v.level), "focus": v.focus, "generation": v.generation, "view": v.view, "positions": v.positions }),
-    ))
+async fn build(State(ctx): State<Ctx>) -> ApiResult {
+    let b = ctx.state.build().ok_or_else(|| "no repository loaded".to_string())?;
+    Ok(Json(serde_json::to_value(&*b).map_err(|e| e.to_string())?))
 }
 
 async fn graph_full(State(ctx): State<Ctx>) -> ApiResult {
@@ -365,37 +354,40 @@ async fn select(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
     ))
 }
 
-async fn focus(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
-    let id = resolve_body_node(&ctx, &body).await?;
-    Ok(Json(
-        ask_frontend(&ctx, "focus", json!({ "id": id }), 20000).await?,
-    ))
+async fn step(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
+    Ok(Json(ask_frontend(&ctx, "step", body, 5000).await?))
 }
 
-async fn level(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
-    Ok(Json(ask_frontend(&ctx, "level", body, 20000).await?))
+async fn view(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
+    Ok(Json(ask_frontend(&ctx, "view", body, 5000).await?))
 }
 
-async fn filter(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
-    Ok(Json(ask_frontend(&ctx, "filter", body, 5000).await?))
-}
-
-async fn camera(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
-    Ok(Json(ask_frontend(&ctx, "camera", body, 5000).await?))
+async fn tab(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
+    Ok(Json(ask_frontend(&ctx, "tab", body, 5000).await?))
 }
 
 #[derive(Deserialize)]
-struct LayoutReq {
-    iterations: Option<u32>,
-    backend: Option<String>,
+struct DesignReq {
+    model: Option<String>,
 }
 
-async fn layout(State(ctx): State<Ctx>, Json(req): Json<LayoutReq>) -> ApiResult {
-    let backend: terrarium_layout::Backend = req.backend.as_deref().unwrap_or("auto").parse()?;
-    crate::layout_runner::start(&ctx.app, req.iterations.unwrap_or(200), backend);
-    Ok(Json(
-        serde_json::to_value(&*ctx.state.layout.lock().unwrap()).map_err(|e| e.to_string())?,
-    ))
+/// Runs the design agents to completion (minutes), then waits for the UI to show the new build.
+async fn design(State(ctx): State<Ctx>, body: Option<Json<DesignReq>>) -> ApiResult {
+    let app = ctx.app.clone();
+    let model = body.and_then(|b| b.0.model);
+    let run = tauri::async_runtime::spawn_blocking(move || commands::do_design(&app, model))
+        .await
+        .map_err(|e| e.to_string())??;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let ui = ask_frontend(&ctx, "state", json!({}), 2000).await.unwrap_or(Value::Null);
+    Ok(Json(json!({ "run": run, "build": backend_state(&ctx)["build"], "ui": ui })))
+}
+
+async fn design_reset(State(ctx): State<Ctx>) -> ApiResult {
+    commands::do_reset_design(&ctx.state)?;
+    let _ = ctx.app.emit("design:reset", json!({}));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    Ok(Json(json!({ "build": backend_state(&ctx)["build"] })))
 }
 
 async fn reset(State(ctx): State<Ctx>) -> ApiResult {
@@ -511,12 +503,11 @@ async fn metrics(State(ctx): State<Ctx>) -> ApiResult {
             "ipc_calls": s.counters.ipc_calls.load(Ordering::Relaxed),
             "bridge_requests": s.counters.bridge_requests.load(Ordering::Relaxed),
             "scans": s.counters.scans.load(Ordering::Relaxed),
-            "layouts": s.counters.layouts.load(Ordering::Relaxed),
+            "designs": s.counters.designs.load(Ordering::Relaxed),
             "frontend_errors": s.counters.frontend_errors.load(Ordering::Relaxed),
             "log_errors": s.telemetry.errors.load(Ordering::Relaxed),
             "log_warnings": s.telemetry.warnings.load(Ordering::Relaxed),
         },
-        "layout": *s.layout.lock().unwrap(),
         "scan_ms": s.graph().map(|g| g.stats.scan_ms),
     })))
 }

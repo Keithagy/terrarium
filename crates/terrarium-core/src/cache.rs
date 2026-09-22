@@ -111,3 +111,29 @@ pub fn find_entry(root: &Path) -> Option<CacheEntry> {
     }
     None
 }
+
+/// The saved design for `root`: `<key>.design.json` next to its graph.
+pub fn design_file(root: &Path) -> PathBuf {
+    graphs_dir().join(format!("{}.design.json", key_for(root)))
+}
+
+pub fn store_design(root: &Path, design: &crate::build::Design) -> Result<PathBuf> {
+    let file = design_file(root);
+    std::fs::create_dir_all(graphs_dir()).context("cannot create cache dir")?;
+    std::fs::write(&file, serde_json::to_vec_pretty(design)?)?;
+    Ok(file)
+}
+
+pub fn load_design(root: &Path) -> Option<crate::build::Design> {
+    std::fs::read(design_file(root)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+/// Forget the saved design, so the engine's is used again. False when there was none.
+pub fn clear_design(root: &Path) -> Result<bool> {
+    let file = design_file(root);
+    if !file.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(file)?;
+    Ok(true)
+}

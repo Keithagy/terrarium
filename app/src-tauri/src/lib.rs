@@ -2,7 +2,6 @@
 
 pub mod bridge;
 pub mod commands;
-pub mod layout_runner;
 pub mod snapshot;
 pub mod state;
 pub mod telemetry;
@@ -22,10 +21,9 @@ pub fn run() {
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             commands::scan_repo,
-            commands::get_view,
-            commands::run_layout,
-            commands::stop_layout,
-            commands::set_position,
+            commands::get_build,
+            commands::design_with_claude,
+            commands::reset_design,
             commands::get_node,
             commands::search_nodes,
             commands::list_flows,
@@ -33,7 +31,6 @@ pub fn run() {
             commands::get_trace,
             commands::list_endpoints,
             commands::list_boundaries,
-            commands::list_hotspots,
             commands::recent_repos,
             commands::report_ui,
             commands::report_metrics,

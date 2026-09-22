@@ -1,56 +1,48 @@
-// Single source of truth for the UI. Panels and the renderer subscribe to it;
+// Single source of truth for the UI. Panels and the brick scene subscribe to it;
 // the bridge reads it to answer `/state`.
 
-import type { EdgeKind, Endpoint, Lang, Level, Stats, Trace, ViewEdge, ViewGraph, ViewNode } from "./types";
+import type { Build, Building, Endpoint, Stats, Trace } from "./types";
 
-export interface Filters {
-  langs: Set<Lang>;
-  edges: Set<EdgeKind>;
-  tag: string;
-  externals: boolean;
-}
+export type Tab = "model" | "manual" | "parts" | "traces" | "design";
+export type ShelfTab = "sub-builds" | "traces" | "endpoints";
+export type View = "iso" | "front" | "top";
 
-export interface LayoutState {
+export interface DesignRunState {
   running: boolean;
-  backend: string;
-  iteration: number;
-  energy: number;
-}
-
-export interface Camera {
-  x: number;
-  y: number;
-  zoom: number;
+  model: string;
+  agents: number;
+  done: number;
+  cost_usd: number;
+  log: { role: string; ok: boolean; cost_usd: number }[];
+  error: string | null;
 }
 
 export interface Store {
   repo: string | null;
   stats: Stats | null;
-  level: Level;
-  focus: number | null;
-  generation: number;
-  nodes: ViewNode[];
-  edges: ViewEdge[];
-  index: Map<number, number>; // node id -> array index
-  positions: Float32Array;
+  build: Build | null;
+  /** Manual steps shown: 0 is the empty baseplate, `steps` is the finished model. */
+  step: number;
+  playing: boolean;
+  speed: number;
+  tab: Tab;
+  shelfTab: ShelfTab;
+  view: View;
+  spin: boolean;
+  /** Selected graph node (a file or a symbol). */
   selection: number | null;
   hover: number | null;
-  neighbourIds: Set<number>;
-  filters: Filters;
-  layout: LayoutState;
-  camera: Camera;
-  search: string;
-  shelfTab: "traces" | "endpoints" | "packages" | "boundaries";
-  /** Which view fills the window: the trace diagram or the force-directed map. */
-  stage: "traces" | "map";
+  /** Building index by file node id, and brick index by symbol node id. */
+  buildingOf: Map<number, number>;
+  brickOf: Map<number, number>;
   traces: Trace[];
   endpoints: Endpoint[];
-  /** The trace on stage (and highlighted on the map). */
+  /** The trace on the Traces tab. */
   trace: Trace | null;
-  /** View node ids on the map that the current trace passes through. */
-  traceIds: Set<number>;
-  /** Light the trace up on the map (after "Show on map"), dimming everything else. */
-  traceOnMap: boolean;
+  /** Light the trace up on the model, dimming everything else. */
+  traceOnModel: boolean;
+  design: DesignRunState;
+  search: string;
   shelfOpen: boolean;
   bridgePort: number | null;
   scanning: string | null;
@@ -60,34 +52,31 @@ export interface Store {
 export const store: Store = {
   repo: null,
   stats: null,
-  level: "file",
-  focus: null,
-  generation: 0,
-  nodes: [],
-  edges: [],
-  index: new Map(),
-  positions: new Float32Array(0),
+  build: null,
+  step: 0,
+  playing: false,
+  speed: 1,
+  tab: "model",
+  shelfTab: "sub-builds",
+  view: "iso",
+  spin: false,
   selection: null,
   hover: null,
-  neighbourIds: new Set(),
-  filters: { langs: new Set(["rust", "typescript", "javascript", "python", "go", "other"]), edges: new Set(["imports", "calls", "flow"]), tag: "", externals: false },
-  layout: { running: false, backend: "", iteration: 0, energy: 0 },
-  camera: { x: 0, y: 0, zoom: 1 },
-  search: "",
-  shelfTab: "traces",
-  stage: "traces",
+  buildingOf: new Map(),
+  brickOf: new Map(),
   traces: [],
   endpoints: [],
   trace: null,
-  traceIds: new Set(),
-  traceOnMap: false,
+  traceOnModel: false,
+  design: { running: false, model: "", agents: 0, done: 0, cost_usd: 0, log: [], error: null },
+  search: "",
   shelfOpen: true,
   bridgePort: null,
   scanning: null,
   graphLoaded: false,
 };
 
-type Topic = "graph" | "positions" | "selection" | "hover" | "filters" | "layout" | "camera" | "repo" | "ui" | "trace";
+type Topic = "build" | "step" | "selection" | "hover" | "tab" | "view" | "trace" | "design" | "repo" | "ui";
 const listeners = new Map<Topic, Set<() => void>>();
 
 export function subscribe(topic: Topic, fn: () => void): () => void {
@@ -100,54 +89,52 @@ export function emit(topic: Topic): void {
   listeners.get(topic)?.forEach((fn) => fn());
 }
 
-export function setGraph(view: ViewGraph, positions: number[], level: Level, focus: number | null, generation: number): void {
-  store.nodes = view.nodes;
-  store.edges = view.edges;
-  store.index = new Map(view.nodes.map((n, i) => [n.id, i]));
-  store.positions = Float32Array.from(positions);
-  store.level = level;
-  store.focus = focus;
-  store.generation = generation;
+export function stepCount(): number {
+  return store.build?.design.steps.length ?? 0;
+}
+
+export function setBuild(b: Build): void {
+  store.build = b;
+  store.buildingOf = new Map(b.model.buildings.map((x, i) => [x.id, i]));
+  store.brickOf = new Map();
+  b.model.bricks.forEach((br, i) => br.nodes.forEach((n) => store.brickOf.set(n, i)));
+  store.step = b.design.steps.length;
+  store.playing = false;
   store.graphLoaded = true;
-  if (store.selection !== null && !store.index.has(store.selection)) store.selection = null;
-  store.hover = null;
-  recomputeNeighbours();
-  recomputeTraceIds();
-  emit("graph");
+  if (store.selection !== null && buildingForNode(store.selection) === null) store.selection = null;
+  emit("build");
+  emit("step");
   emit("selection");
 }
 
-/** Put a trace on stage (or clear it) and work out which map nodes it touches. */
-export function setTrace(t: Trace | null): void {
-  store.trace = t;
-  recomputeTraceIds();
-  emit("trace");
+/** The building a node lives in: the file itself, or the file of a symbol. */
+export function buildingForNode(id: number): number | null {
+  const direct = store.buildingOf.get(id);
+  if (direct !== undefined) return direct;
+  const brick = store.brickOf.get(id);
+  return brick === undefined ? null : store.build!.model.bricks[brick].building;
 }
 
-function recomputeTraceIds(): void {
-  store.traceIds = new Set();
-  const t = store.trace;
-  if (!t) return;
-  // A step is a symbol; at the file or package level it lands on its file or package.
-  const byPath = new Map(store.nodes.map((n) => [n.path, n.id]));
-  const byGroupName = new Map(store.nodes.filter((n) => n.kind === "package").map((n) => [n.name, n.id]));
-  for (const s of t.steps) {
-    const id = byPath.get(s.path) ?? byPath.get(s.path.split("#")[0]) ?? byGroupName.get(s.lane);
-    if (id !== undefined) store.traceIds.add(id);
-  }
+export function buildingAt(i: number | null): Building | null {
+  return i === null ? null : store.build?.model.buildings[i] ?? null;
 }
 
-export function setPositions(flat: number[], generation: number): boolean {
-  if (generation !== store.generation || flat.length !== store.positions.length) return false;
-  store.positions.set(flat);
-  emit("positions");
-  return true;
+export function setStep(n: number): void {
+  const clamped = Math.max(0, Math.min(stepCount(), Math.round(n)));
+  if (clamped === store.step) return;
+  store.step = clamped;
+  emit("step");
+}
+
+export function setTab(t: Tab): void {
+  if (store.tab === t) return;
+  store.tab = t;
+  emit("tab");
 }
 
 export function select(id: number | null): void {
   if (store.selection === id) return;
   store.selection = id;
-  recomputeNeighbours();
   emit("selection");
 }
 
@@ -157,57 +144,46 @@ export function setHover(id: number | null): void {
   emit("hover");
 }
 
-function recomputeNeighbours(): void {
-  store.neighbourIds = new Set();
-  const s = store.selection;
-  if (s === null) return;
-  for (const e of store.edges) {
-    if (e.from === s) store.neighbourIds.add(e.to);
-    else if (e.to === s) store.neighbourIds.add(e.from);
+export function setTrace(t: Trace | null): void {
+  store.trace = t;
+  emit("trace");
+}
+
+/** Building indices the current trace passes through. */
+export function traceBuildings(t: Trace | null = store.trace): Set<number> {
+  const out = new Set<number>();
+  if (!t || !store.build) return out;
+  const byPath = new Map(store.build.model.buildings.map((b, i) => [b.path, i]));
+  for (const s of t.steps) {
+    const i = byPath.get(s.path.split("#")[0]);
+    if (i !== undefined) out.add(i);
   }
-}
-
-export function nodeVisible(n: ViewNode): boolean {
-  const f = store.filters;
-  if (!f.langs.has(n.lang)) return false;
-  if (!f.externals && n.external) return false;
-  if (f.tag && !(n.tags ?? []).some((t) => t.startsWith(f.tag))) return false;
-  return true;
-}
-
-export function edgeVisible(e: ViewEdge, visible: Uint8Array): boolean {
-  if (!store.filters.edges.has(e.kind)) return false;
-  const a = store.index.get(e.from);
-  const b = store.index.get(e.to);
-  if (a === undefined || b === undefined) return false;
-  return visible[a] === 1 && visible[b] === 1;
+  return out;
 }
 
 export function snapshot(): Record<string, unknown> {
   const s = store;
+  const b = s.build;
+  const selB = s.selection !== null ? buildingAt(buildingForNode(s.selection)) : null;
   return {
     repo: s.repo,
     graph_loaded: s.graphLoaded,
-    level: s.level,
-    focus: s.focus,
-    generation: s.generation,
+    tab: s.tab,
+    step: s.step,
+    steps: stepCount(),
+    step_title: s.step > 0 ? b?.design.steps[s.step - 1]?.title ?? null : null,
+    playing: s.playing,
+    view: s.view,
+    spin: s.spin,
     selection: s.selection,
-    selection_path: s.selection !== null ? s.nodes[s.index.get(s.selection) ?? -1]?.path ?? null : null,
+    selection_path: selB ? (s.selection !== null && s.brickOf.has(s.selection) ? `${selB.path}#${b!.model.bricks[s.brickOf.get(s.selection)!].name}` : selB.path) : null,
     hover: s.hover,
-    camera: { ...s.camera },
-    layout: { ...s.layout },
-    filters: { langs: [...s.filters.langs], edges: [...s.filters.edges], tag: s.filters.tag, externals: s.filters.externals },
-    search: s.search,
-    stage: s.stage,
     trace: s.trace?.entry_path ?? null,
-    trace_steps: s.trace?.steps.length ?? 0,
-    trace_on_map: s.traceOnMap,
-    trace_nodes: s.traceIds.size,
-    panels: { shelf: s.shelfOpen, shelf_tab: s.shelfTab, card: s.selection !== null, empty: !s.graphLoaded, scanning: s.scanning !== null },
-    nodes_visible: s.nodes.filter(nodeVisible).length,
-    edges_visible: s.edges.filter((e) => s.filters.edges.has(e.kind)).length,
-    nodes: s.nodes.length,
-    edges: s.edges.length,
+    trace_on_model: s.traceOnModel,
+    build: b ? { title: b.design.title, source: b.design.source, model: b.design.model ?? null, pieces: b.check.pieces, steps: b.check.steps, sub_builds: b.check.sub_builds, weak: b.check.weak.length, repairs: b.check.repairs?.length ?? 0 } : null,
+    designing: s.design.running,
+    search: s.search,
+    panels: { shelf: s.shelfOpen, shelf_tab: s.shelfTab, card: s.selection !== null && s.tab !== "manual", empty: !s.graphLoaded, scanning: s.scanning !== null },
     scanning: s.scanning,
     bridge_port: s.bridgePort,
     ts: new Date().toISOString(),

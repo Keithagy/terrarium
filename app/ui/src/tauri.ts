@@ -3,7 +3,7 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Boundary, CacheEntry, Endpoint, FlowRow, NodeDetail, ScanDone, Trace, ViewPayload } from "./types";
+import type { Boundary, Build, CacheEntry, Endpoint, FlowRow, NodeDetail, ScanDone, Trace } from "./types";
 
 export const inTauri = isTauri();
 
@@ -20,10 +20,9 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 
 export const api = {
   scanRepo: (path: string, fresh = false) => call<ScanDone>("scan_repo", { path, fresh }),
-  getView: (level: string, focus: number | null, backend?: string) => call<ViewPayload>("get_view", { level, focus, backend }),
-  runLayout: (iterations?: number, backend?: string) => call<unknown>("run_layout", { iterations, backend }),
-  stopLayout: () => call<void>("stop_layout"),
-  setPosition: (index: number, x: number, y: number) => call<void>("set_position", { index, x, y }),
+  getBuild: () => call<Build>("get_build"),
+  designWithClaude: (model?: string) => call<unknown>("design_with_claude", { model }),
+  resetDesign: () => call<Build>("reset_design"),
   getNode: (id: number) => call<NodeDetail>("get_node", { id }),
   search: (q: string, limit = 30) => call<{ id: number; name: string; path: string; kind: string; lang: string; tags: string[] }[]>("search_nodes", { q, limit }),
   flows: () => call<FlowRow[]>("list_flows"),

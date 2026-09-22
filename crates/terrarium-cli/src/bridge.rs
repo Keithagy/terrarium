@@ -90,7 +90,21 @@ impl Bridge {
     }
 
     pub fn post(&self, path: &str, body: Value) -> Result<Value> {
-        let mut req = self.agent.post(format!("{}{}", self.base, path));
+        self.post_with(&self.agent, path, body)
+    }
+
+    /// POST for calls that run for minutes (a Claude design run).
+    pub fn post_long(&self, path: &str, body: Value) -> Result<Value> {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(1800)))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        self.post_with(&agent, path, body)
+    }
+
+    fn post_with(&self, agent: &ureq::Agent, path: &str, body: Value) -> Result<Value> {
+        let mut req = agent.post(format!("{}{}", self.base, path));
         if let Some(t) = &self.token {
             req = req.header("x-terrarium-token", t);
         }

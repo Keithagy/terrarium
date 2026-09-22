@@ -6,49 +6,76 @@
     <title>Terrarium</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
-  <body>
+  <body data-tab="model">
     <div id="titlebar" data-tauri-drag-region></div>
-    <canvas id="gl" data-testid="canvas"></canvas>
-    <canvas id="labels"></canvas>
+    <div id="scene" data-testid="scene"></div>
+
+    <header id="header" data-testid="header" data-panel="header" data-tauri-drag-region>
+      <button id="repo-name" class="header-title" data-testid="repo-name" title="Open another repository">No repository</button>
+      <div id="chips" class="header-chips" data-testid="chips"></div>
+      <div class="header-actions">
+        <button id="design-btn" class="primary" data-testid="design-claude" title="One Claude agent per sub-build reads the code and writes the manual; the engine checks every joint">Design with Claude</button>
+        <button id="help-btn" class="ghost is-round" data-testid="help" title="Keyboard shortcuts">?</button>
+      </div>
+    </header>
 
     <aside id="shelf" data-testid="shelf" data-panel="shelf">
       <div class="shelf-search">
-        <input id="search" data-testid="search" type="search" placeholder="Find a file, symbol or package" autocomplete="off" spellcheck="false" />
+        <input id="search" data-testid="search" type="search" placeholder="Find a file or symbol" autocomplete="off" spellcheck="false" />
         <ul id="search-results" data-testid="search-results" hidden></ul>
       </div>
       <nav class="tabs" role="tablist">
-        <button class="tab is-active" data-tab="traces" data-testid="tab-traces" role="tab">Traces</button>
+        <button class="tab is-active" data-tab="sub-builds" data-testid="tab-sub-builds" role="tab">Sub-builds</button>
+        <button class="tab" data-tab="traces" data-testid="tab-traces" role="tab">Traces</button>
         <button class="tab" data-tab="endpoints" data-testid="tab-endpoints" role="tab">Endpoints</button>
-        <button class="tab" data-tab="packages" data-testid="tab-packages" role="tab">Packages</button>
-        <button class="tab" data-tab="boundaries" data-testid="tab-boundaries" role="tab">Boundaries</button>
       </nav>
-      <section class="tab-panel is-active" data-tab-panel="traces" data-testid="traces"></section>
+      <section class="tab-panel is-active" data-tab-panel="sub-builds" data-testid="sub-builds"></section>
+      <section class="tab-panel" data-tab-panel="traces" data-testid="traces"></section>
       <section class="tab-panel" data-tab-panel="endpoints" data-testid="endpoints"></section>
-      <section class="tab-panel" data-tab-panel="packages" data-testid="packages"></section>
-      <section class="tab-panel" data-tab-panel="boundaries" data-testid="boundaries"></section>
       <footer class="legend" data-testid="legend"></footer>
     </aside>
 
-    <main id="trace-view" data-testid="trace-view" data-panel="trace" hidden></main>
+    <nav id="stage-tabs" class="segmented stage-tabs" data-testid="stage-tabs" role="tablist" aria-label="View">
+      <button data-stage-tab="model" data-testid="stage-model" class="is-active" title="The brick model (M)">Model</button>
+      <button data-stage-tab="manual" data-testid="stage-manual" title="Step-by-step manual (N)">Manual</button>
+      <button data-stage-tab="parts" data-testid="stage-parts" title="Parts inventory (P)">Parts</button>
+      <button data-stage-tab="traces" data-testid="stage-traces" title="Requests across languages (T)">Traces</button>
+      <button data-stage-tab="design" data-testid="stage-design" title="Who designed it and the joint check (D)">Design</button>
+    </nav>
+
+    <div id="view-controls" class="segmented view-controls" data-testid="view-controls" role="group" aria-label="Camera">
+      <button data-view="iso" data-testid="view-iso" class="is-active" title="Isometric (1)">Iso</button>
+      <button data-view="front" data-testid="view-front" title="Front (2)">Front</button>
+      <button data-view="top" data-testid="view-top" title="Top (3)">Top</button>
+      <button id="spin-btn" data-testid="view-spin" title="Turntable (S)">Spin</button>
+      <button id="fit-btn" data-testid="view-fit" title="Fit (F)">Fit</button>
+    </div>
+
+    <main id="page" data-testid="manual-page" data-panel="manual" hidden></main>
+    <main id="parts-view" class="stage-panel" data-testid="parts-view" data-panel="parts" hidden></main>
+    <main id="trace-view" class="stage-panel" data-testid="trace-view" data-panel="trace" hidden></main>
+    <main id="design-view" class="stage-panel" data-testid="design-view" data-panel="design" hidden></main>
 
     <aside id="card" data-testid="card" data-panel="card" hidden></aside>
 
-    <footer id="bench" data-testid="bench" data-panel="bench">
-      <button id="repo-name" class="bench-repo" data-testid="repo-name" title="Open another repository">No repository</button>
-      <div class="segmented" role="group" aria-label="View">
-        <button data-stage="traces" data-testid="stage-traces" class="is-active" title="End-to-end traces (T)">Traces</button>
-        <button data-stage="map" data-testid="stage-map" title="Force-directed map (M)">Map</button>
+    <footer id="timeline" data-testid="timeline" data-panel="timeline">
+      <div class="transport">
+        <button id="tl-first" class="ghost is-round" data-testid="timeline-first" title="Empty baseplate (Home)">⏮</button>
+        <button id="tl-play" class="play" data-testid="timeline-play" title="Play the build (Space)">▶</button>
+        <button id="tl-last" class="ghost is-round" data-testid="timeline-last" title="Finished model (End)">⏭</button>
       </div>
-      <div class="segmented" id="levels" role="group" aria-label="Level">
-        <button data-level="package" data-testid="level-package">Packages</button>
-        <button data-level="file" data-testid="level-file" class="is-active">Files</button>
-        <button data-level="symbol" data-testid="level-symbol">Symbols</button>
+      <div class="segmented speeds" role="group" aria-label="Speed">
+        <button data-speed="0.5" data-testid="speed-0.5">0.5×</button>
+        <button data-speed="1" data-testid="speed-1" class="is-active">1×</button>
+        <button data-speed="2" data-testid="speed-2">2×</button>
+        <button data-speed="4" data-testid="speed-4">4×</button>
       </div>
-      <button id="layout-status" class="bench-pill" data-testid="layout-status" title="Run the layout again">layout idle</button>
-      <span id="counts" class="bench-text" data-testid="counts"></span>
-      <span id="fps" class="bench-text" data-testid="fps"></span>
+      <div class="scrub">
+        <div class="scrub-label"><b id="tl-title" data-testid="timeline-title">No build yet</b><span id="tl-meta" data-testid="timeline-meta"></span></div>
+        <input id="tl-range" data-testid="timeline-range" type="range" min="0" max="0" step="1" value="0" aria-label="Build step" />
+      </div>
+      <button id="tl-status" class="bench-pill is-quiet" data-testid="timeline-status" title="Where the manual is">Finished</button>
       <span id="bridge" class="bench-pill is-quiet" data-testid="bridge" title="Local agent bridge">bridge starting</span>
-      <button id="help-btn" class="bench-pill is-quiet" data-testid="help" title="Keyboard shortcuts">?</button>
     </footer>
 
     <div id="empty" class="overlay" data-testid="empty">
@@ -59,23 +86,20 @@
               <stop offset="0" stop-color="#2E3D35" stop-opacity=".9"/>
               <stop offset="1" stop-color="#1F2A24" stop-opacity=".95"/>
             </linearGradient>
-            <radialGradient id="lamp" cx=".5" cy=".5" r=".5">
-              <stop offset="0" stop-color="#F2B950" stop-opacity=".9"/>
-              <stop offset="1" stop-color="#F2B950" stop-opacity="0"/>
-            </radialGradient>
           </defs>
           <rect x="44" y="12" width="72" height="14" rx="5" fill="#C99A3C"/>
           <path d="M30 40 Q30 24 46 24 H114 Q130 24 130 40 V170 Q130 190 110 190 H50 Q30 190 30 170 Z" fill="url(#glass)" stroke="#D9E4DA" stroke-opacity=".25"/>
-          <path d="M36 150 Q80 120 124 150 V172 Q124 184 112 184 H48 Q36 184 36 172 Z" fill="#2E241C"/>
-          <ellipse cx="80" cy="150" rx="40" ry="16" fill="#8FBF6A"/>
-          <ellipse cx="62" cy="144" rx="14" ry="9" fill="#A3CF7E"/>
-          <circle cx="98" cy="96" r="34" fill="url(#lamp)"/>
-          <circle cx="98" cy="96" r="7" fill="#F2B950"/>
+          <rect x="40" y="168" width="80" height="12" rx="2" fill="#4E7F86"/>
+          <rect x="46" y="140" width="22" height="28" rx="2" fill="#6FB3E0"/>
+          <rect x="72" y="118" width="22" height="50" rx="2" fill="#E0904A"/>
+          <rect x="98" y="148" width="16" height="20" rx="2" fill="#8FBF6A"/>
+          <circle cx="83" cy="112" r="4" fill="#F2B950"/>
+          <path d="M57 140 Q70 100 83 118" stroke="#F2B950" stroke-width="2.5" fill="none" stroke-linecap="round"/>
           <path d="M40 40 V160" stroke="#D9E4DA" stroke-opacity=".12" stroke-width="3" stroke-linecap="round"/>
         </svg>
       </div>
       <h1>A quiet place to watch a codebase</h1>
-      <p>Open a repository and Terrarium follows each request from where it starts, across every language it passes through, to where the data comes to rest.</p>
+      <p>Open a repository and Terrarium builds it as a brick model: packages are districts, files are buildings, and a manual adds them in the order you can read them.</p>
       <div class="empty-actions">
         <button id="open-btn" class="primary" data-testid="open-repo">Open a repository</button>
         <span class="hint">or drop a folder here</span>
@@ -85,7 +109,7 @@
 
     <div id="scanning" class="overlay" data-testid="scanning" hidden>
       <div class="spinner"></div>
-      <h2>Growing the graph</h2>
+      <h2>Sorting the bricks</h2>
       <p id="scanning-path" class="mono"></p>
     </div>
 
@@ -95,14 +119,15 @@
         <dl class="keys">
           <dt>⌘O</dt><dd>Open a repository</dd>
           <dt>/</dt><dd>Search</dd>
-          <dt>T · M</dt><dd>Traces, map</dd>
+          <dt>M N P T D</dt><dd>Model, manual, parts, traces, design</dd>
+          <dt>Space</dt><dd>Play or pause the build</dd>
+          <dt>← →</dt><dd>Previous, next step</dd>
+          <dt>Home End</dt><dd>Empty baseplate, finished model</dd>
+          <dt>1 2 3</dt><dd>Iso, front, top</dd>
+          <dt>S F</dt><dd>Spin, fit</dd>
           <dt>J K</dt><dd>Next, previous trace</dd>
-          <dt>1 2 3</dt><dd>Packages, files, symbols on the map</dd>
-          <dt>F</dt><dd>Fit everything in view</dd>
-          <dt>L</dt><dd>Settle the layout again</dd>
           <dt>Esc</dt><dd>Clear selection</dd>
-          <dt>Double-click</dt><dd>Open a node one level deeper</dd>
-          <dt>Scroll · pinch</dt><dd>Pan · zoom</dd>
+          <dt>Drag · scroll · pinch</dt><dd>Orbit · pan · zoom</dd>
         </dl>
         <p class="hint">Agents: <code>terrarium app state</code>, <code>terrarium app screenshot</code>, or GET <code id="help-bridge">http://127.0.0.1</code></p>
         <button class="primary" data-testid="help-close">Close</button>

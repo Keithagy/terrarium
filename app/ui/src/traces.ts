@@ -1,10 +1,11 @@
-// The trace stage: shelf lists of traces and endpoints, and the lane diagram that
-// follows one request from its entry point across every boundary to its sinks.
+// Traces: the shelf lists of traces and endpoints, and the Traces tab's lane
+// diagram that follows one request from its entry point across every boundary
+// to its sinks.
 // One lane per package, one row per step in call order; calls are quiet tree
 // connectors, boundary crossings are amber lines into another lane.
 
 import { api, log } from "./tauri";
-import { store, subscribe, emit, select, setTrace } from "./store";
+import { store, subscribe, select, setTab, setTrace } from "./store";
 import { LANG_LABEL, type Endpoint, type Lang, type Trace } from "./types";
 import { esc, toast } from "./panels";
 
@@ -19,7 +20,7 @@ const PAD = 28;
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T;
 
 export interface TraceActions {
-  showOnMap(): void;
+  showOnModel(): void;
 }
 
 let actions: TraceActions;
@@ -29,26 +30,8 @@ let focusStep: number | null = null;
 export function initTraces(a: TraceActions): void {
   actions = a;
   subscribe("trace", () => { renderTraceList(); renderStage(); });
-  // "ui" fires for every tab click and status change; redraw only when the stage
-  // itself changes so the diagram keeps its scroll position.
-  let shown = "";
-  subscribe("ui", () => {
-    applyStage();
-    const key = `${store.stage}|${store.graphLoaded}|${store.trace?.entry ?? ""}`;
-    if (key !== shown) { shown = key; renderStage(); }
-  });
+  subscribe("tab", renderStage);
   subscribe("selection", markSelected);
-  document.querySelectorAll<HTMLButtonElement>("[data-stage]").forEach((b) =>
-    b.addEventListener("click", () => setStage(b.dataset.stage as "traces" | "map")),
-  );
-  applyStage();
-}
-
-export function setStage(stage: "traces" | "map"): void {
-  if (store.stage === stage) return;
-  store.stage = stage;
-  log("info", "stage", { stage });
-  emit("ui");
 }
 
 /** Fetch traces and endpoints for the loaded repo; called after every scan. */
@@ -60,21 +43,19 @@ export async function loadTraces(firstForRepo: boolean): Promise<void> {
     store.traces = [];
     store.endpoints = [];
   }
-  const keep = store.trace && store.traces.find((t) => t.entry === store.trace!.entry);
-  store.traceOnMap = false;
-  setTrace(keep ?? store.traces[0] ?? null);
+  const keep = !firstForRepo && store.trace && store.traces.find((t) => t.entry === store.trace!.entry);
+  store.traceOnModel = false;
+  setTrace(keep || store.traces[0] || null);
   renderEndpoints();
-  // Traces lead when there is something to follow; otherwise the map is all there is.
-  if (firstForRepo) setStage(store.traces.length ? "traces" : "map");
   log("info", "traces loaded", { traces: store.traces.length, endpoints: store.endpoints.length, gaps: store.endpoints.filter((e) => e.status !== "ok").length });
 }
 
 export function showTrace(t: Trace, stepPath?: string): void {
-  store.traceOnMap = false;
+  store.traceOnModel = false;
   focusStep = stepPath ? t.steps.findIndex((s) => s.path === stepPath) : null;
   select(null);
   setTrace(t);
-  setStage("traces");
+  setTab("traces");
 }
 
 /** Trace from any node, not only entry points: "what happens from here on". */
@@ -94,11 +75,6 @@ export function stepTrace(delta: number): void {
   const next = store.traces[(i + delta + store.traces.length) % store.traces.length];
   showTrace(next);
   document.querySelector(`[data-testid="trace-${next.entry}"]`)?.scrollIntoView({ block: "nearest" });
-}
-
-function applyStage(): void {
-  document.body.dataset.stage = store.stage;
-  document.querySelectorAll<HTMLButtonElement>("[data-stage]").forEach((b) => b.classList.toggle("is-active", b.dataset.stage === store.stage));
 }
 
 // ---- shelf -------------------------------------------------------------------
@@ -210,12 +186,12 @@ function summary(t: Trace): string {
 
 function renderStage(): void {
   const el = $("#trace-view");
-  el.hidden = store.stage !== "traces" || !store.graphLoaded;
+  el.hidden = store.tab !== "traces" || !store.graphLoaded;
   if (el.hidden) return;
   const t = store.trace;
   if (!t) {
-    el.innerHTML = `<div class="trace-empty"><h2>Nothing to trace yet</h2><p>${store.traces.length ? "Pick a trace from the shelf." : "No request in this repository crosses a language or process boundary that Terrarium can pair up. The map still shows how files depend on each other."}</p>${store.traces.length ? "" : `<button class="ghost" data-testid="trace-empty-map">Open the map</button>`}</div>`;
-    el.querySelector("[data-testid=trace-empty-map]")?.addEventListener("click", () => setStage("map"));
+    el.innerHTML = `<div class="trace-empty"><h2>Nothing to trace yet</h2><p>${store.traces.length ? "Pick a trace from the shelf." : "No request in this repository crosses a language or process boundary that Terrarium can pair up. The model and its manual still show how files rest on each other."}</p>${store.traces.length ? "" : `<button class="ghost" data-testid="trace-empty-model">Open the model</button>`}</div>`;
+    el.querySelector("[data-testid=trace-empty-model]")?.addEventListener("click", () => setTab("model"));
     return;
   }
   const steps = t.steps;
@@ -275,7 +251,7 @@ function renderStage(): void {
       <div class="trace-title"><h2 data-testid="trace-title">${esc(t.name)}</h2><span class="trace-path">${esc(t.entry_path.split("#")[0])}</span></div>
       <p class="trace-summary" data-testid="trace-summary">${esc(summary(t))}</p>
       <div class="trace-actions">
-        <button class="ghost" data-testid="trace-show-map" title="Light up this trace on the map">Show on map</button>
+        <button class="ghost" data-testid="trace-show-model" title="Light up the buildings this trace passes through">Show on model</button>
         <button class="ghost" data-testid="trace-open" title="Open the entry point in your editor">Open in editor</button>
       </div>
     </header>
@@ -287,7 +263,7 @@ function renderStage(): void {
         ${pills}
       </div>
     </div>`;
-  el.querySelector("[data-testid=trace-show-map]")!.addEventListener("click", () => actions.showOnMap());
+  el.querySelector("[data-testid=trace-show-model]")!.addEventListener("click", () => actions.showOnModel());
   el.querySelector("[data-testid=trace-open]")!.addEventListener("click", () => {
     const s = steps[0];
     void api.openPath(s.path.split("#")[0], s.line).catch((e) => toast(`Cannot open: ${String(e)}`, "error"));

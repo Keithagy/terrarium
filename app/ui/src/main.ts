@@ -1,44 +1,83 @@
-// Bootstrap: renderer, panels, interaction, backend events, agent hooks.
+// Bootstrap: brick scene, panels, manual, backend events, keyboard, agent hooks.
 
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, inTauri, log, on } from "./tauri";
-import { store, subscribe, emit, select, setGraph, setPositions, setHover, snapshot } from "./store";
-import { Renderer } from "./renderer";
-import { initPanels, refreshRecent, renderFps, toast, toggleHelp, type Actions } from "./panels";
+import { store, subscribe, emit, select, setBuild, setHover, setStep, setTab, stepCount, snapshot, traceBuildings, buildingForNode, buildingAt, type Tab } from "./store";
+import { BrickScene, type Hit } from "./bricks";
+import { initPanels, refreshRecent, setShelfTab, toast, toggleHelp, type Actions } from "./panels";
 import { initBridge } from "./bridge";
-import { initTraces, loadTraces, setStage, stepTrace } from "./traces";
-import type { LayoutTick, ScanDone, ViewPayload } from "./types";
+import { initTraces, loadTraces, stepTrace } from "./traces";
+import { initManual, stop, togglePlay } from "./manual";
+import { initParts } from "./parts";
+import { initDesign } from "./design";
+import type { ScanDone } from "./types";
 
-const canvas = document.getElementById("gl") as HTMLCanvasElement;
-const labels = document.getElementById("labels") as HTMLCanvasElement;
-const renderer = new Renderer(canvas, labels);
+const scene = new BrickScene(document.getElementById("scene")!);
 
-// ---- actions -----------------------------------------------------------------
+// ---- the scene follows the store ----------------------------------------------
 
-let firstLoad = true;
-
-async function loadView(level: "package" | "file" | "symbol", focus: number | null): Promise<void> {
-  const t0 = performance.now();
-  let payload: ViewPayload;
-  try {
-    payload = await api.getView(level, focus);
-  } catch (e) {
-    toast(`Cannot build the ${level} view: ${String(e)}`, "error");
-    log("error", "get_view failed", { level, focus, error: String(e) });
-    return;
-  }
-  store.repo = payload.root;
-  store.stats = payload.stats;
-  setGraph(payload.view, payload.positions, payload.level, payload.focus, payload.generation);
-  store.layout = { running: true, backend: store.layout.backend, iteration: 0, energy: 1 };
-  emit("layout");
-  emit("repo");
+let lastStep = -1;
+subscribe("build", () => {
+  const b = store.build!;
+  scene.setModel(b.model, b.design.steps.length);
+  lastStep = store.step;
+  applyHighlight();
+  applySelection();
+});
+subscribe("step", () => {
+  // One step forward (playing or pressing next) drops the new pieces in; jumps just cut.
+  const animate = store.step === lastStep + 1;
+  scene.setStep(store.step - 1, { animate });
+  lastStep = store.step;
+});
+subscribe("selection", applySelection);
+subscribe("trace", applyHighlight);
+let lastTab = store.tab;
+subscribe("tab", () => {
+  document.body.dataset.tab = store.tab;
+  // Model and Manual give the scene different room; frame it again once the box has resized.
+  const room = (t: Tab) => (t === "manual" ? "narrow" : t === "model" ? "wide" : "none");
+  if (room(store.tab) !== room(lastTab) && room(store.tab) !== "none") requestAnimationFrame(() => requestAnimationFrame(() => scene.fit()));
+  lastTab = store.tab;
+  document.querySelectorAll<HTMLElement>("[data-stage-tab]").forEach((b) => b.classList.toggle("is-active", b.dataset.stageTab === store.tab));
+  log("info", "tab", { tab: store.tab });
   emit("ui");
-  if (firstLoad || focus === null) renderer.fit();
-  firstLoad = false;
-  log("info", "view loaded", { level, focus, nodes: payload.view.nodes.length, edges: payload.view.edges.length, ms: Math.round(performance.now() - t0) });
+});
+subscribe("view", () => {
+  document.querySelectorAll<HTMLElement>("[data-view]").forEach((b) => b.classList.toggle("is-active", b.dataset.view === store.view));
+  document.getElementById("spin-btn")!.classList.toggle("is-active", store.spin);
+});
+
+function applySelection(): void {
+  const id = store.selection;
+  if (id === null || !store.build) { scene.select(null); return; }
+  const building = buildingForNode(id);
+  if (building === null) { scene.select(null); return; }
+  const brick = store.brickOf.get(id) ?? store.build.model.bricks.findIndex((br) => br.building === building);
+  scene.select({ building, brick });
 }
+
+function applyHighlight(): void {
+  scene.highlight(store.trace && store.traceOnModel ? traceBuildings() : null);
+}
+
+scene.onPick((hit: Hit | null) => {
+  if (!hit || !store.build) { select(null); return; }
+  const b = store.build.model;
+  const brick = b.bricks[hit.brick];
+  const building = b.buildings[hit.building];
+  // In the manual, a brick is a way back to the step that added it.
+  if (store.tab === "manual") { stop(); setStep(building.step + 1); }
+  select(brick ? brick.nodes[0] : building.id);
+});
+scene.onHover((hit) => {
+  const b = store.build?.model;
+  setHover(hit && b ? b.bricks[hit.brick]?.nodes[0] ?? b.buildings[hit.building].id : null);
+  document.getElementById("scene")!.classList.toggle("is-pointing", !!hit);
+});
+
+// ---- actions ---------------------------------------------------------------------
 
 const actions: Actions = {
   async openRepo(path?: string) {
@@ -51,44 +90,41 @@ const actions: Actions = {
     if (!path) return;
     await scan(path, false);
   },
-  async setLevel(level, focus = null) {
-    setStage("map");
-    if (level === store.level && focus === store.focus && store.graphLoaded) return;
-    firstLoad = firstLoad || level !== store.level;
-    await loadView(level, focus);
+  focusBuilding(index) {
+    const b = buildingAt(index);
+    if (b) scene.focusDistrict(b.district);
   },
-  async focusNode(id) {
-    setStage("map");
-    const i = store.index.get(id);
-    const n = i !== undefined ? store.nodes[i] : null;
-    if (!n) return;
-    if (n.kind === "symbol") { select(id); actions.centerOn(id); return; }
-    if (n.kind === "package" && store.level === "package") { await loadView("file", null); await selectAndCenter(id, true); return; }
-    await loadView(store.level === "package" ? "package" : "file", id);
-    // after expanding, the parent is gone from the view; select the first child if any
-    const child = store.nodes.find((c) => c.id !== id && store.index.has(c.id) && c.group === n.group && c.kind !== n.kind);
-    if (child) { select(child.id); actions.centerOn(child.id); }
+  focusDistrict(index) {
+    scene.focusDistrict(index);
   },
-  centerOn(id) {
-    const i = store.index.get(id);
-    if (i === undefined) return;
-    const x = store.positions[i * 2], y = store.positions[i * 2 + 1];
-    animateCamera(x, y, Math.max(store.camera.zoom, 1.4));
-  },
-  relayout() {
-    void api.runLayout(300).then(() => { store.layout.running = true; emit("layout"); toast("Settling the layout again", "info", 1600); }).catch((e) => toast(String(e), "error"));
-  },
-  fit() {
-    renderer.fit();
+  showTraceOnModel() {
+    select(null);
+    store.traceOnModel = true;
+    setStep(stepCount());
+    setTab("model");
+    emit("trace");
   },
 };
 
-async function selectAndCenter(id: number, fallbackToChild = false): Promise<void> {
-  if (store.index.has(id)) { select(id); actions.centerOn(id); return; }
-  if (fallbackToChild) {
-    const child = store.nodes.find((c) => c.group === id);
-    if (child) { select(child.id); actions.centerOn(child.id); }
+async function loadBuild(firstForRepo: boolean): Promise<void> {
+  const t0 = performance.now();
+  try {
+    setBuild(await api.getBuild());
+  } catch (e) {
+    toast(`Cannot build the model: ${String(e)}`, "error");
+    log("error", "get_build failed", { error: String(e) });
+    return;
   }
+  if (firstForRepo) {
+    select(null);
+    setTab("model");
+    scene.fit();
+  }
+  await loadTraces(firstForRepo);
+  emit("repo");
+  emit("ui");
+  const b = store.build!;
+  log("info", "build loaded", { source: b.design.source, steps: b.check.steps, pieces: b.check.pieces, weak: b.check.weak.length, ms: Math.round(performance.now() - t0) });
 }
 
 let scanStartedHere = false;
@@ -102,11 +138,11 @@ async function scan(path: string, fresh: boolean): Promise<void> {
     const done: ScanDone = await api.scanRepo(path, fresh);
     log("info", "scan done", { path, from_cache: done.from_cache, files: done.stats.files, ms: Math.round(performance.now() - t0) });
     store.scanning = null;
-    firstLoad = true;
-    select(null);
-    await loadView("file", null);
-    await loadTraces(true);
-    toast(done.from_cache ? `Opened ${done.stats.files} files from cache. Press R to rescan.` : `Scanned ${done.stats.files} files, ${done.stats.flows} flows`, "ok");
+    store.repo = done.root;
+    store.stats = done.stats;
+    await loadBuild(true);
+    const b = store.build;
+    toast(done.from_cache ? `Opened ${done.stats.files} files from cache. Press R to rescan.` : `Built ${done.stats.files} files in ${b?.check.steps ?? 0} steps`, "ok");
     void refreshRecent();
   } catch (e) {
     store.scanning = null;
@@ -118,117 +154,47 @@ async function scan(path: string, fresh: boolean): Promise<void> {
   }
 }
 
-// ---- camera ------------------------------------------------------------------
+// ---- controls ----------------------------------------------------------------------
 
-let camAnim = 0;
-function animateCamera(x: number, y: number, zoom: number): void {
-  cancelAnimationFrame(camAnim);
-  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const from = { ...store.camera };
-  const start = performance.now();
-  const dur = reduced ? 0 : 420;
-  // aim for the free space between panels, not the window centre
-  const offX = ((store.shelfOpen ? 330 : 40) - (store.selection !== null ? 370 : 40)) / 2;
-  const step = (now: number) => {
-    const t = dur === 0 ? 1 : Math.min(1, (now - start) / dur);
-    const k = 1 - Math.pow(1 - t, 3);
-    store.camera.zoom = from.zoom + (zoom - from.zoom) * k;
-    store.camera.x = from.x + (x - offX / store.camera.zoom - from.x) * k;
-    store.camera.y = from.y + (y - from.y) * k;
-    emit("camera");
-    if (t < 1) camAnim = requestAnimationFrame(step);
-  };
-  camAnim = requestAnimationFrame(step);
+document.querySelectorAll<HTMLButtonElement>("[data-stage-tab]").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.stageTab as Tab)));
+document.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view as typeof store.view)));
+document.getElementById("spin-btn")!.addEventListener("click", () => setSpin(!store.spin));
+document.getElementById("fit-btn")!.addEventListener("click", () => scene.fit());
+
+function setView(v: typeof store.view): void {
+  store.view = v;
+  scene.setView(v);
+  emit("view");
 }
 
-// ---- pointer interaction -----------------------------------------------------
-
-let drag: { kind: "pan" | "node"; index: number; startX: number; startY: number; camX: number; camY: number; moved: boolean } | null = null;
-
-canvas.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0) return;
-  canvas.setPointerCapture(e.pointerId);
-  const idx = renderer.pick(e.clientX, e.clientY);
-  drag = { kind: idx >= 0 ? "node" : "pan", index: idx, startX: e.clientX, startY: e.clientY, camX: store.camera.x, camY: store.camera.y, moved: false };
-  if (idx < 0) canvas.classList.add("is-grabbing");
-});
-
-canvas.addEventListener("pointermove", (e) => {
-  if (drag) {
-    const dx = e.clientX - drag.startX, dy = e.clientY - drag.startY;
-    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-    if (drag.kind === "pan") {
-      store.camera.x = drag.camX - dx / store.camera.zoom;
-      store.camera.y = drag.camY - dy / store.camera.zoom;
-      emit("camera");
-    } else if (drag.moved) {
-      const [wx, wy] = renderer.screenToWorld(e.clientX, e.clientY);
-      store.positions[drag.index * 2] = wx;
-      store.positions[drag.index * 2 + 1] = wy;
-      emit("positions");
-    }
-    return;
-  }
-  const idx = renderer.pick(e.clientX, e.clientY);
-  setHover(idx >= 0 ? store.nodes[idx].id : null);
-  canvas.classList.toggle("is-node", idx >= 0);
-});
-
-canvas.addEventListener("pointerup", (e) => {
-  if (!drag) return;
-  canvas.classList.remove("is-grabbing");
-  const d = drag;
-  drag = null;
-  if (d.kind === "node") {
-    if (d.moved) {
-      void api.setPosition(d.index, store.positions[d.index * 2], store.positions[d.index * 2 + 1]);
-    } else {
-      select(store.nodes[d.index].id);
-    }
-  } else if (!d.moved && e.detail === 1) {
-    select(null);
-  }
-});
-
-canvas.addEventListener("dblclick", (e) => {
-  const idx = renderer.pick(e.clientX, e.clientY);
-  if (idx >= 0) void actions.focusNode(store.nodes[idx].id);
-});
-
-canvas.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  const cam = store.camera;
-  if (e.ctrlKey || e.metaKey) {
-    // pinch (ctrlKey on macOS trackpads) or cmd+scroll → zoom around the cursor
-    const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.012 : 0.0025));
-    const [wx, wy] = renderer.screenToWorld(e.clientX, e.clientY);
-    const zoom = Math.min(Math.max(cam.zoom * factor, 0.02), 12);
-    cam.x = wx - (e.clientX - renderer.width / 2) / zoom;
-    cam.y = wy - (e.clientY - renderer.height / 2) / zoom;
-    cam.zoom = zoom;
-  } else {
-    cam.x += e.deltaX / cam.zoom;
-    cam.y += e.deltaY / cam.zoom;
-  }
-  emit("camera");
-}, { passive: false });
+function setSpin(on: boolean): void {
+  store.spin = on;
+  scene.setSpin(on);
+  emit("view");
+}
 
 window.addEventListener("keydown", (e) => {
   const inInput = (e.target as HTMLElement)?.tagName === "INPUT";
   if (e.metaKey && e.key.toLowerCase() === "o") { e.preventDefault(); void actions.openRepo(); return; }
   if (e.metaKey && e.key.toLowerCase() === "k") { e.preventDefault(); (document.getElementById("search") as HTMLInputElement).focus(); return; }
-  if (inInput) return;
+  if (inInput || e.metaKey || e.ctrlKey) return;
+  const tabs: Record<string, Tab> = { m: "model", n: "manual", p: "parts", t: "traces", d: "design" };
+  const k = e.key.toLowerCase();
+  if (tabs[k]) { setTab(tabs[k]); return; }
   switch (e.key) {
     case "/": e.preventDefault(); (document.getElementById("search") as HTMLInputElement).focus(); break;
-    case "t": case "T": setStage("traces"); break;
-    case "m": case "M": setStage("map"); break;
+    case " ": e.preventDefault(); togglePlay(); break;
+    case "ArrowRight": stop(); setStep(store.step + 1); break;
+    case "ArrowLeft": stop(); setStep(store.step - 1); break;
+    case "Home": stop(); setStep(0); break;
+    case "End": stop(); setStep(stepCount()); break;
+    case "1": setView("iso"); break;
+    case "2": setView("front"); break;
+    case "3": setView("top"); break;
+    case "s": case "S": setSpin(!store.spin); break;
+    case "f": case "F": scene.fit(); break;
     case "j": case "J": stepTrace(1); break;
     case "k": case "K": stepTrace(-1); break;
-    case "1": void actions.setLevel("package"); break;
-    case "2": void actions.setLevel("file"); break;
-    case "3": void actions.setLevel("symbol"); break;
-    case "f": case "F": if (store.stage === "map") renderer.fit(); break;
-    case "l": case "L": actions.relayout(); break;
     case "r": case "R": if (store.repo) void scan(store.repo, true); break;
     case "?": toggleHelp(); break;
     case "Escape": if (store.selection !== null) select(null); else toggleHelp(false); break;
@@ -236,28 +202,17 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-// ---- backend events ----------------------------------------------------------
-
-void on<LayoutTick>("layout:tick", (tick) => {
-  if (!setPositions(tick.positions, tick.generation)) return;
-  store.layout = { running: !tick.done, backend: tick.backend, iteration: tick.iteration, energy: tick.energy };
-  emit("layout");
-  if (tick.done && firstLoadFit) { renderer.fit(); firstLoadFit = false; }
-});
-let firstLoadFit = false;
-subscribe("graph", () => { firstLoadFit = store.focus === null; });
+// ---- backend events ----------------------------------------------------------------
 
 void on<{ path: string }>("scan:started", ({ path }) => { store.scanning = path; emit("ui"); });
 void on<{ path: string; error: string }>("scan:error", ({ error }) => { store.scanning = null; emit("ui"); toast(`Scan failed: ${error}`, "error", 6000); });
-// A scan started from the bridge (not from this UI) still needs the view loaded here.
-void on<ScanDone>("scan:done", () => {
-  if (scanStartedHere) return; // scan() loads the view itself
-  {
-    store.scanning = null;
-    firstLoad = true;
-    select(null);
-    void loadView("file", null).then(() => loadTraces(true));
-  }
+// A scan started from the bridge (not from this UI) still needs the build loaded here.
+void on<ScanDone>("scan:done", (done) => {
+  if (scanStartedHere) return; // scan() loads it itself
+  store.scanning = null;
+  store.repo = done.root;
+  store.stats = done.stats;
+  void loadBuild(true);
 });
 
 if (inTauri) {
@@ -266,38 +221,32 @@ if (inTauri) {
   });
 }
 
-// ---- reporting (keeps /state and /metrics fresh even without a round trip) ------
+// ---- reporting (keeps /state and /metrics fresh even without a round trip) ---------
 
 let lastReport = "";
 setInterval(() => {
   if (!inTauri) return;
   const snap = snapshot();
-  const key = JSON.stringify([snap.selection, snap.level, snap.focus, snap.hover, snap.camera, snap.filters, snap.panels, snap.graph_loaded, snap.stage, snap.trace]);
+  const { ts, ...rest } = snap;
+  const key = JSON.stringify(rest);
   if (key !== lastReport) {
     lastReport = key;
-    const { camera, selection, hover, level, focus, graph_loaded, search, filters, panels, nodes_visible, edges_visible, stage, trace, ts } = snap as Record<string, never>;
-    void api.reportUi({ camera, selection, hover, level, focus, graph_loaded, search, filters, panels, nodes_visible, edges_visible, stage, trace, ts }).catch(() => {});
+    void api.reportUi({ ...rest, ts }).catch(() => {});
   }
 }, 500);
 setInterval(() => {
-  const s = renderer.stats();
-  renderFps(s.fps, s.frame_ms_p50);
-  if (inTauri) void api.reportMetrics({ ...s, ts: new Date().toISOString() }).catch(() => {});
+  if (inTauri) void api.reportMetrics({ ...scene.stats(), ts: new Date().toISOString() }).catch(() => {});
 }, 1000);
 
-// ---- boot ----------------------------------------------------------------------
+// ---- boot --------------------------------------------------------------------------
 
 initPanels(actions);
-initTraces({
-  showOnMap() {
-    select(null);
-    store.traceOnMap = true;
-    setStage("map");
-    emit("trace");
-    renderer.fit();
-  },
-});
-initBridge(renderer, actions);
+initTraces({ showOnModel: () => actions.showTraceOnModel() });
+initManual();
+initParts();
+initDesign();
+initBridge(scene, actions);
+setShelfTab("sub-builds");
 
 (async () => {
   if (!inTauri) { log("warn", "running outside Tauri: open the app with `terrarium app launch`"); return; }
@@ -311,5 +260,5 @@ initBridge(renderer, actions);
     const initial = await api.initialRepo();
     if (initial) await scan(initial, false);
   } catch (e) { log("warn", `initial repo failed: ${String(e)}`); }
-  log("info", "ui ready", { renderer: renderer.rendererName, dpr: window.devicePixelRatio });
+  log("info", "ui ready", { renderer: scene.rendererName, dpr: window.devicePixelRatio });
 })();

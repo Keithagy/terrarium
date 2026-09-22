@@ -216,7 +216,7 @@ where
 pub fn init() -> std::sync::Arc<Telemetry> {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let telemetry = std::sync::Arc::new(Telemetry::default());
-    let filter = EnvFilter::try_from_env("TERRARIUM_LOG").unwrap_or_else(|_| EnvFilter::new("info,terrarium_core=info,terrarium_layout=info,ui=info,wgpu_core=warn,wgpu_hal=warn,naga=warn"));
+    let filter = EnvFilter::try_from_env("TERRARIUM_LOG").unwrap_or_else(|_| EnvFilter::new("info,terrarium_core=info,ui=info"));
     let logs_dir = terrarium_core::cache::logs_dir();
     let _ = std::fs::create_dir_all(&logs_dir);
     let file = std::fs::OpenOptions::new()

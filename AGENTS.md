@@ -32,36 +32,41 @@ terrarium app screenshot --out s.png    # native WKWebView snapshot, includes th
 terrarium app ui                        # semantic snapshot: panels, testids, texts, toasts
 terrarium app logs --level warn         # anything that went wrong, backend and frontend
 terrarium app metrics                   # fps, frame p50/p95, draw calls, memory, counters
-terrarium app profile                   # span timings: scan, build_view, layout_run, screenshot
+terrarium app profile                   # span timings: scan, assemble_build, design_with_claude, screenshot
 terrarium app quit
 ```
 
-A healthy run shows `graph_loaded: true`, `layout.backend` of `gpu` or `cpu`,
+A healthy run shows `graph_loaded: true`, `build.weak: 0`,
 `counters.frontend_errors: 0` and no `WARN`/`ERROR` events.
 
 ## Interacting
 
 ```sh
-terrarium app select web/src/api.ts        # by path, id, or unique name; returns state
-terrarium app focus web/src/api.ts         # expand a file into its symbols and centre it
-terrarium app level symbol                 # package | file | symbol
+terrarium app select web/src/api.ts        # file or symbol by path, id, or unique name; returns state
+terrarium app step 4                       # scrub the build: 0 = empty plate, omit = finished
+terrarium app tab manual                   # model | manual | parts | traces | design
+terrarium app view top --spin false        # iso | front | top, --spin, --fit
 terrarium app search fetch                 # types into the search box, returns the results
-terrarium app filter --langs python,go --edges flow
-terrarium app camera --fit                 # or --x --y --zoom
-terrarium app layout --iterations 300 --backend gpu
-terrarium app click level-package          # any data-testid
+terrarium app design                       # Claude designs the manual (blocks; spends money); --reset
+terrarium app click stage-parts            # any data-testid
 terrarium app type search "handle"         # any input by data-testid
-terrarium app eval 'store.nodes.length'    # JavaScript in the webview; `store`, `renderer`, `terrarium` are in scope
-terrarium app reset
+terrarium app eval 'store.build.check'     # JavaScript in the webview; `store`, `scene`, `terrarium` are in scope
+terrarium app reset                        # finished model, no selection or highlight, fit
 ```
 
 Every `data-testid` in the UI is listed by `terrarium app ui`. Stable ones:
-`search`, `tab-traces|endpoints|packages|boundaries`, `stage-traces|map`,
-`trace-<entry id>`, `step-<index>`, `trace-show-map`, `trace-from`, `clear-trace`,
-`endpoint-<key>` (e.g. `endpoint-http /api/users`), `level-package|file|symbol`, `lang-<lang>`,
-`edge-imports|calls|flow`, `toggle-externals`, `node-<id>`, `flow-<from>-<to>`,
-`card`, `card-title`, `card-path`, `card-close`, `open-file`, `expand`, `nb-<id>`,
-`layout-status`, `bridge`, `open-repo`, `recent-repo`, `toast`.
+`search`, `stage-model|manual|parts|traces|design`, `view-iso|front|top|spin|fit`,
+`timeline-first|play|last|range|title`, `speed-0.5|1|2|4`, `chip-pieces|steps|check|source`,
+`design-claude`, `design-run`, `design-reset`, `check-weak`, `check-gaps`,
+`tab-sub-builds|traces|endpoints`, `district-<sub-build id>`, `building-<file id>`,
+`page-title`, `page-caption`, `page-prev`, `page-next`, `chapter-<id>`, `part-<file id>`,
+`trace-<entry id>`, `step-<index>` (trace lane steps), `trace-show-model`, `trace-from`,
+`clear-trace`, `endpoint-<key>` (e.g. `endpoint-http /api/users`), `parts-table`,
+`card`, `card-title`, `card-path`, `card-step`, `card-close`, `open-file`, `nb-<id>`,
+`canvas`, `bridge`, `open-repo`, `recent-repo`, `toast`.
+
+Bridge ops that change the picture (`step`, `view`, `tab`, `click`) answer after the
+frame and any drop-in animation, so a screenshot taken straight after shows the result.
 
 ## The bridge directly
 
@@ -84,35 +89,44 @@ curl -s -H "x-terrarium-token: $TOKEN" -X POST localhost:47311/select -d '{"node
 - `TERRARIUM_LOG=debug` (env filter syntax) raises verbosity for the app and the CLI.
 - `TERRARIUM_DEVTOOLS=1` opens the WebKit inspector on launch.
 - `terrarium app eval` runs inside the page; `window.__terrarium` exposes `store`,
-  `renderer`, `actions`, `snapshot()`, `ui()`, `select(id)`.
+  `scene`, `actions`, `snapshot()`, `ui()`, `select(id)`.
 - `TERRARIUM_OPEN=<path>` (or a path as the first argument) scans a repo at startup.
 
 ## Profiling
 
 - `terrarium app profile` aggregates every tracing span since launch (`scan`, `walk`,
-  `parse`, `resolve_imports`, `resolve_calls`, `derive_flows`, `build_view`,
-  `layout_run`, `screenshot`) with count, total, mean, max and last durations.
-- `terrarium app metrics` reports the renderer's frame time percentiles, draw calls
-  (three per frame: patches, edges, nodes), nodes/edges/labels drawn, RSS memory.
-- `terrarium layout --backend gpu|cpu --iterations N` benchmarks the layout outside the
-  app; `--level symbol` on a big repo is the stress case.
+  `parse`, `resolve_imports`, `resolve_calls`, `derive_flows`, `assemble_build`,
+  `design_with_claude`, `screenshot`) with count, total, mean, max and last durations.
+- `terrarium app metrics` reports the scene's frame time percentiles, draw calls (about
+  ten, whatever the repo size: bricks and studs are instanced), pieces drawn, RSS memory.
+  The scene renders on demand, so an idle window costs nothing.
 - `logs/app.jsonl` includes span close events with `time.busy`/`time.idle`.
 
 ## Code map
 
 - Scanner: `crates/terrarium-core/src/scan.rs` (walk → packages → parse → nodes → tags →
   imports → calls → flows). Language extractors: `src/lang/*.rs`. Boundary heuristics:
-  `src/tags.rs`. Queries: `src/query.rs`. Cache: `src/cache.rs`.
-- Layout: `crates/terrarium-layout/src/force.wgsl` is the algorithm; `cpu.rs` mirrors it.
-- App: `app/src-tauri/src/{commands,bridge,layout_runner,telemetry,snapshot}.rs`.
-- UI: `app/ui/src/{main,renderer,store,panels,bridge,tauri}.ts`.
+  `src/tags.rs`. Queries and traces: `src/query.rs`. Cache (graphs and saved designs):
+  `src/cache.rs`.
+- Build: `crates/terrarium-core/src/build.rs` (dependency order with cycles collapsed,
+  engine design, joint check, repair, brick geometry). Designer:
+  `src/designer.rs` (one `claude -p` agent per sub-build + an assembler; the runner is
+  injectable, and `tests/designer.rs` drives it with stand-ins).
+- App: `app/src-tauri/src/{commands,bridge,telemetry,snapshot}.rs`.
+- UI: `app/ui/src/{main,bricks,store,panels,manual,parts,design,traces,bridge,tauri}.ts`.
+  `bricks.ts` is the three.js scene.
 
 ## Tests
 
 ```sh
-cargo test --workspace            # ~10s; layout parity test needs a GPU and skips without one
+cargo test --workspace            # ~10s; no GPU or Claude needed
 cargo test -p terrarium-core      # scanner against fixtures/polyglot
 ```
 
 Add fixture cases to `fixtures/polyglot` and assertions to
-`crates/terrarium-core/tests/polyglot.rs` when touching extraction or flow detection.
+`crates/terrarium-core/tests/polyglot.rs` when touching extraction or flow detection, and
+to `tests/build.rs` when touching the order, check, repair or geometry.
+
+`terrarium design` spends real money (the fixture: about $0.40 on `claude-opus-5-5`), so
+verify.sh never runs it. Set `TERRARIUM_DESIGN_MODEL` to change the model and
+`TERRARIUM_CLAUDE` to point at a `claude` binary.

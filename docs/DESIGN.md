@@ -5,8 +5,11 @@
 A terrarium: a glass jar you keep on a desk and look into now and then to see how the
 small world inside is doing. The product is a desktop app that developers (and their
 agents) open to see the shape of a polyglot repository: which packages exist, how files
-depend on each other, and where data crosses language boundaries. Its job is to make that
-shape legible in one glance and let you dig into one specimen at a time.
+rest on each other, and where data crosses language boundaries. The world inside the jar
+is a brick model of the repository, built step by step, because a model you can watch go
+together teaches the order to read the code in. A node graph shows that things are
+connected, but a node's position means nothing; in the model, position means district,
+height means size, and the build order means dependency.
 
 ## Tokens
 
@@ -18,68 +21,74 @@ Colour, a green-glass base with several warm accents rather than one:
 | glass-2 / glass-3 | `#1F2A24` / `#26332C` | panels, controls |
 | mist | `#D9E4DA` | primary text |
 | fern / fern-dim | `#8FA396` / `#5F7266` | secondary text, import edges |
-| lamp | `#F2B950` | the one warm accent: data flows, selection, primary button |
-| rust / typescript / javascript / python / go / other | `#E0904A` `#6FB3E0` `#E6D25A` `#8FBF6A` `#5ED3C0` `#A99AC9` | node colour by language |
+| lamp | `#F2B950` | the one warm accent: bridges (data flows), lamps, selection, primary button, step numbers |
+| rust / typescript / javascript / python / go / other | `#E0904A` `#6FB3E0` `#E6D25A` `#8FBF6A` `#5ED3C0` `#A99AC9` | brick colour by language |
 
-Type: **Fraunces** (variable, optical size and SOFT axes) for the repo name, node titles
-and package labels on the canvas; **IBM Plex Sans** for UI text; **IBM Plex Mono** only
+Type: **Fraunces** (variable, optical size and SOFT axes) for the model's title, step
+titles, sub-build names and card titles; **IBM Plex Sans** for UI text; **IBM Plex Mono** only
 where the content is code (paths, ids, tags). Fonts are bundled in `app/ui/public/fonts`.
 
-Layout: the canvas is the whole window. Three floating glass panels, each a different
-shape for a different job: the shelf (left, a list), the specimen card (right, a sheet
-with an amber top edge that appears only when something is selected), the bench (bottom
-strip, status and mode). Everything left-aligned.
+Layout: the model sits in the middle of the window on canal water, with floating glass
+panels around it, each shaped for its job. The header (top: the model's name and chips
+like a brick set's box: pieces, steps, sub-builds, studs, joints, "holds together"). The
+shelf (left, lists: sub-builds, traces, endpoints). The stage tabs (Model, Manual, Parts,
+Traces, Design). The timeline (bottom: play the build at 0.5×–4×, scrub, first and last).
+The specimen card (right, an amber top edge, only when something is selected), or the
+manual page in its place on the Manual tab.
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│ ┌ shelf ─────┐                              ┌ specimen ──────┐ │
-│ │ search     │          canvas              │ api.ts         │ │
-│ │ packages   │     moss patches, discs,     │ tags, facts    │ │
-│ │ flows      │     amber flows              │ used by / uses │ │
-│ │ legend     │                              └────────────────┘ │
-│ └────────────┘                                                 │
-│ bench: repo  [packages files symbols]  layout ●   counts  fps  │
-└────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│ Polyglot Test Town  27 pieces 12 steps … holds together  [Design with Claude] │
+│ ┌ shelf ─────┐ [Model Manual Parts Traces Design]   ┌ page / card ─┐ │
+│ │ search     │ [Iso Front Top Spin Fit]             │ 6  Rust crate │ │
+│ │ sub-builds │        brick model on canal water    │ Expose        │ │
+│ │ traces     │     districts · towers · bridges     │ scan_repo …   │ │
+│ │ endpoints  │                                      │ parts, rests  │ │
+│ │ legend     │ ┌ timeline ──────────────────────────┴───────────────┐ │
+│ └────────────┘ │ ⏮ ▶ ⏭  0.5× 1× 2× 4×  Step 6 of 12 ──●────────── │ │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-Two stages fill the space behind the panels. **Traces** (the default when a repository
-has any) follows one request from its entry point to where its data comes to rest: one
-lane per package, one row per step in call order, calls as quiet fern connectors and
-each boundary crossing as an amber line into the next lane, labelled with its route or
-command. Position means something here — left to right is who hands data to whom, top to
-bottom is call order — which the force-directed **map** cannot say. The map stays for
-the shape of the whole repository, and "Show on map" lights a trace up on it.
+The model's grammar: a package is a district (a stud baseplate tinted toward sand and
+stone), a file is a building standing on it, and each function, type or constant is one
+brick in that building, stacked in source order (files with more than 14 share bricks).
+Cross-language flows are amber arched bridges from the calling brick to the handling
+brick. A file that starts a trace carries an amber lamp on its roof. Districts pack onto
+one baseplate with two-stud canals between them.
 
-```
-│ ┌ shelf ─────┐  main  web/src/app.ts                            │
-│ │ traces     │  Crosses 4 boundaries through TypeScript, …      │
-│ │ endpoints  │  polyglot-web     polyglot-api     worker        │
-│ │ packages   │  [main]                                          │
-│ │ boundaries │   └[fetchUsers]──http /api/users──▶[get_users]   │
-│ └────────────┘                                     └[list_users db]
-```
+The manual adds files in dependency order, so each step only rests on steps before it.
+The Manual tab's page names the chapter (sub-build), the step's title and caption, the
+parts it adds (the bricks, by name), what they rest on (links to earlier steps), and the
+bridges the step completes. The Parts tab is the parts list from the front of a set. The
+Design tab says who designed the manual (the engine, or Claude agents) and shows the
+joint check.
 
-The Endpoints tab is the contract check: routes nothing in the repository calls, and
-calls nothing in the repository serves, sorted first.
+The Traces tab keeps the lane diagram for one request: one lane per package, one row per
+step in call order, calls as quiet fern connectors and each boundary crossing as an
+amber line into the next lane, labelled with its route or command. "Show on model"
+dims every building the trace does not pass through.
 
 ## Principles
 
-- The graph is the hero. Panels are translucent and quiet; nothing on them glows.
-- Boldness is spent once: data flows are amber and thicker, with a slow travelling light
-  when they belong to the selected node. Everything else is desaturated green.
-- Structure encodes information: package membership is a soft moss patch under the
-  nodes, not a box; edge direction is a fade toward the target, not an arrowhead;
-  external dependencies are small and dim because they are leaves.
-- Motion only answers an action: the layout settling after a scan, the camera easing to
-  a selection. No entrance animations. `prefers-reduced-motion` disables the easing.
-- Words are plain verbs: "Open a repository", "Show 4 inside", "Settling the layout".
+- The model is the hero. Panels are translucent and quiet; nothing on them glows.
+- Boldness is spent once: amber marks data crossing languages (bridges), landmarks
+  (lamps) and where you are (selection, the current step). Bricks carry the six
+  language hues; plates and water stay muted.
+- Structure encodes information, and nothing is placed at random: district is package,
+  height is how much a file defines, build order is what rests on what. External
+  dependencies are left out, because they are not part of what you are reading.
+- Every piece must hold. The engine checks each design joint by joint and repairs what an
+  agent placed too early, and the header says whether the model holds together.
+- Motion only answers an action: pieces dropping in as the build plays, the camera easing
+  to a district, the turntable when asked. `prefers-reduced-motion` disables the easing.
+- Words are plain verbs: "Open a repository", "Start building", "Trace from here".
   Empty and error states say what to do next.
 
 ## Review against the defaults
 
 The near-black-plus-one-neon-accent look was the obvious default here and was rejected:
 the base is a tinted green with real depth from vibrancy, and colour carries meaning
-(language) across six hues. No all-caps eyebrow labels, no numbered markers, no
-middle-dot metadata strings in the panels (the bench uses them once, as a counter line,
-where they are a list). Rounded corners differ by role (16px panels, 9px controls,
+(language) across six hues. No all-caps eyebrow labels. Step numbers are the one place
+numbered markers appear, because in a build manual the number is the content. Middle
+dots appear only in counter lines, where they separate a list. Rounded corners differ by role (16px panels, 9px controls,
 pills for status) rather than one radius everywhere.

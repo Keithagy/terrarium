@@ -11,7 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 terrarium-core.workspace = true
-terrarium-layout.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -99,6 +99,119 @@ export interface FlowRow {
   label: string;
 }
 
+// ---- the build: crates/terrarium-core/src/build.rs, serialised as is ----------
+
+export interface SubBuild {
+  id: string;
+  name: string;
+  blurb: string;
+  package: string;
+}
+
+export interface BuildStep {
+  sub_build: string;
+  title: string;
+  caption: string;
+  files: string[];
+}
+
+export interface Design {
+  schema: number;
+  source: string; // "engine" | "claude"
+  model?: string;
+  scanned_at: string;
+  title: string;
+  summary: string;
+  sub_builds: SubBuild[];
+  steps: BuildStep[];
+}
+
+export interface WeakJoint {
+  kind: "early" | "missing" | "duplicate" | "unknown" | "sub-build";
+  file: string;
+  detail: string;
+}
+
+export interface BuildCheck {
+  ok: boolean;
+  pieces: number;
+  files: number;
+  steps: number;
+  sub_builds: number;
+  joints: number;
+  bridges: number;
+  weak: WeakJoint[];
+  interlocked: string[][];
+  loose: string[];
+  unresolved: number;
+  gaps: number;
+  repairs?: string[];
+}
+
+/** A package on the baseplate. Units are studs; x runs right, z runs toward the viewer. */
+export interface District {
+  sub_build: string;
+  name: string;
+  lang: Lang;
+  x: number;
+  z: number;
+  w: number;
+  d: number;
+}
+
+/** A file: a stack of `layers` bricks with a w×d footprint. */
+export interface Building {
+  id: number;
+  path: string;
+  name: string;
+  lang: Lang;
+  district: number;
+  x: number;
+  z: number;
+  w: number;
+  d: number;
+  layers: number;
+  /** Zero-based manual step that adds it. */
+  step: number;
+  /** Starts a trace across a boundary: a landmark with a lamp on top. */
+  lamp: boolean;
+  /** Buildings this one rests on (imports or calls into). */
+  rests_on: number[];
+}
+
+/** One layer of a building: one symbol (or several, when a file has more than 14). */
+export interface Brick {
+  building: number;
+  nodes: number[];
+  name: string;
+  layer: number;
+  kind?: string;
+  sinks?: string[];
+}
+
+/** A cross-language flow: an amber bridge between two bricks (indices into `bricks`). */
+export interface Bridge {
+  from: number;
+  to: number;
+  label: string;
+  step: number;
+}
+
+export interface BuildModel {
+  studs: [number, number];
+  districts: District[];
+  buildings: Building[];
+  bricks: Brick[];
+  bridges: Bridge[];
+}
+
+export interface Build {
+  design: Design;
+  check: BuildCheck;
+  model: BuildModel;
+  stale?: string;
+}
+
 export interface TraceStep {
   id: number;
   name: string;

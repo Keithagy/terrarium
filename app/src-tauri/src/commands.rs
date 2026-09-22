@@ -1,15 +1,14 @@
 //! Tauri commands: the frontend's view of the backend. The agent bridge reuses these.
 
-use crate::layout_runner;
-use crate::state::{AppState, FrameMetrics, UiReport, ViewState, level_name, parse_level};
+use crate::state::{AppState, FrameMetrics, UiReport};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
-use terrarium_core::{Graph, NodeId, NodeKind, ScanOptions, cache, query};
-use terrarium_layout::Backend;
+use terrarium_core::build::{self, Build};
+use terrarium_core::{Graph, NodeId, NodeKind, ScanOptions, cache, designer, query};
 
 type Res<T> = Result<T, String>;
 
@@ -50,8 +49,13 @@ pub fn do_scan(app: &AppHandle, path: &str, fresh: bool) -> anyhow::Result<ScanD
             cached: cached.to_string_lossy().to_string(),
             from_cache,
         };
+        let b = {
+            let _s = tracing::info_span!("assemble_build").entered();
+            build::for_graph(&graph, cache::load_design(root))
+        };
+        tracing::info!(source = %b.design.source, steps = b.check.steps, pieces = b.check.pieces, weak = b.check.weak.len(), repairs = b.check.repairs.len(), "build assembled");
         *state.graph.write().unwrap() = Some(Arc::new(graph));
-        *state.view.write().unwrap() = None;
+        *state.build.write().unwrap() = Some(Arc::new(b));
         Ok::<_, anyhow::Error>(done)
     })();
     state.scanning.store(false, Ordering::SeqCst);
@@ -85,157 +89,74 @@ pub async fn scan_repo(
         .map_err(err)
 }
 
-#[derive(Serialize)]
-pub struct ViewPayload {
-    pub generation: u64,
-    pub level: &'static str,
-    pub focus: Option<NodeId>,
-    pub view: terrarium_core::ViewGraph,
-    pub positions: Vec<f32>,
-    pub root: String,
-    pub stats: terrarium_core::Stats,
+#[tauri::command]
+pub fn get_build(state: State<'_, Arc<AppState>>) -> Res<Arc<Build>> {
+    state.count(&state.counters.ipc_calls);
+    state.build().ok_or_else(|| "no repository loaded".into())
 }
 
-/// Build the view for a level/focus, seed positions (reusing old ones where ids match), start layout.
-pub fn build_view(
-    app: &AppHandle,
-    level: NodeKind,
-    focus: Option<NodeId>,
-    backend: Backend,
-) -> anyhow::Result<ViewPayload> {
+/// Have Claude design the manual: one agent per sub-build plus an assembler.
+/// Progress arrives as `design:progress` events; the result is saved next to the
+/// graph and becomes the current build.
+pub fn do_design(app: &AppHandle, model: Option<String>) -> anyhow::Result<Value> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let graph = state
-        .graph()
-        .ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
-    let _span = tracing::info_span!("build_view", level = level_name(level), focus).entered();
-    let view = graph.view(level, focus);
-    let mut positions: Vec<[f32; 2]> = Vec::with_capacity(view.nodes.len());
-    let generation;
-    {
-        let mut slot = state.view.write().unwrap();
-        let prev = slot.take();
-        generation = prev.as_ref().map(|p| p.generation + 1).unwrap_or(1);
-        // reuse positions: same id → same spot; new nodes → near parent's old spot or seeded
-        let old: std::collections::HashMap<NodeId, [f32; 2]> = prev
-            .as_ref()
-            .map(|p| {
-                p.view
-                    .nodes
-                    .iter()
-                    .zip(&p.positions)
-                    .map(|(n, pos)| (n.id, *pos))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let group_ids: std::collections::HashMap<NodeId, u32> = {
-            let mut m = std::collections::HashMap::new();
-            for n in &view.nodes {
-                let next = m.len() as u32;
-                m.entry(n.group).or_insert(next);
-            }
-            m
-        };
-        let groups: Vec<u32> = view
-            .nodes
-            .iter()
-            .map(|n| {
-                if n.external {
-                    terrarium_layout::NO_GROUP
-                } else {
-                    group_ids[&n.group]
-                }
-            })
-            .collect();
-        let seeded =
-            terrarium_layout::seed_positions(view.nodes.len(), &groups, group_ids.len() as u32);
-        for (i, n) in view.nodes.iter().enumerate() {
-            let p = old.get(&n.id).copied().or_else(|| {
-                // parent (or any ancestor) had a position: spawn near it
-                let mut cur = graph.node(n.id).parent;
-                while let Some(c) = cur {
-                    if let Some(p) = old.get(&c) {
-                        let s = seeded[i];
-                        return Some([
-                            p[0] + (s[0] - seeded[0][0]) * 0.15,
-                            p[1] + (s[1] - seeded[0][1]) * 0.15,
-                        ]);
-                    }
-                    cur = graph.node(c).parent;
-                }
-                None
-            });
-            positions.push(p.unwrap_or(seeded[i]));
+    let graph = state.graph().ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
+    if state.designing.swap(true, Ordering::SeqCst) {
+        anyhow::bail!("a design is already running");
+    }
+    let _ = app.emit("design:started", json!({}));
+    let result = (|| {
+        let _span = tracing::info_span!("design_with_claude").entered();
+        let mut opts = designer::Options::default();
+        if let Some(m) = model {
+            opts.model = m;
         }
-        *slot = Some(ViewState {
-            level,
-            focus,
-            view: view.clone(),
-            positions: positions.clone(),
-            generation,
-        });
+        let root = Path::new(&graph.root);
+        let runner = designer::claude_runner(root, &opts);
+        let progress = |p: designer::Progress| {
+            tracing::info!(progress = %serde_json::to_string(&p).unwrap_or_default(), "design progress");
+            let _ = app.emit("design:progress", &p);
+        };
+        let (design, run) = designer::design(&graph, &opts, &runner, &progress)?;
+        cache::store_design(root, &design)?;
+        let b = build::for_graph(&graph, Some(design));
+        tracing::info!(model = %run.model, cost_usd = run.cost_usd, secs = run.secs, steps = b.check.steps, weak = b.check.weak.len(), "design done");
+        *state.build.write().unwrap() = Some(Arc::new(b));
+        state.count(&state.counters.designs);
+        Ok::<_, anyhow::Error>(serde_json::to_value(&run)?)
+    })();
+    state.designing.store(false, Ordering::SeqCst);
+    match &result {
+        Ok(run) => {
+            let _ = app.emit("design:done", run);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "design failed");
+            let _ = app.emit("design:error", json!({ "error": e.to_string() }));
+        }
     }
-    let flat: Vec<f32> = positions.iter().flat_map(|p| [p[0], p[1]]).collect();
-    let iterations = (600 - (view.nodes.len() as i64 / 20)).clamp(150, 600) as u32;
-    layout_runner::start(app, iterations, backend);
-    Ok(ViewPayload {
-        generation,
-        level: level_name(level),
-        focus,
-        view,
-        positions: flat,
-        root: graph.root.clone(),
-        stats: graph.stats.clone(),
-    })
+    result
 }
 
 #[tauri::command]
-pub async fn get_view(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    level: String,
-    focus: Option<NodeId>,
-    backend: Option<String>,
-) -> Res<ViewPayload> {
+pub async fn design_with_claude(app: AppHandle, state: State<'_, Arc<AppState>>, model: Option<String>) -> Res<Value> {
     state.count(&state.counters.ipc_calls);
-    let backend: Backend = backend.as_deref().unwrap_or("auto").parse().map_err(err)?;
     let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        build_view(&app2, parse_level(&level), focus, backend)
-    })
-    .await
-    .map_err(err)?
-    .map_err(err)
+    tauri::async_runtime::spawn_blocking(move || do_design(&app2, model)).await.map_err(err)?.map_err(err)
+}
+
+/// Forget Claude's design and go back to the engine's.
+pub fn do_reset_design(state: &AppState) -> anyhow::Result<Arc<Build>> {
+    let graph = state.graph().ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
+    cache::clear_design(Path::new(&graph.root))?;
+    let b = Arc::new(build::for_graph(&graph, None));
+    *state.build.write().unwrap() = Some(b.clone());
+    Ok(b)
 }
 
 #[tauri::command]
-pub fn run_layout(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    iterations: Option<u32>,
-    backend: Option<String>,
-) -> Res<Value> {
-    state.count(&state.counters.ipc_calls);
-    let backend: Backend = backend.as_deref().unwrap_or("auto").parse().map_err(err)?;
-    layout_runner::start(&app, iterations.unwrap_or(200), backend);
-    serde_json::to_value(&*state.layout.lock().unwrap()).map_err(err)
-}
-
-#[tauri::command]
-pub fn stop_layout(state: State<'_, Arc<AppState>>) -> Res<()> {
-    state.count(&state.counters.ipc_calls);
-    layout_runner::CANCEL_SLOT.cancel();
-    Ok(())
-}
-
-/// Frontend moved a node by hand; keep the backend copy in sync.
-#[tauri::command]
-pub fn set_position(state: State<'_, Arc<AppState>>, index: usize, x: f32, y: f32) -> Res<()> {
-    if let Some(v) = state.view.write().unwrap().as_mut()
-        && index < v.positions.len()
-    {
-        v.positions[index] = [x, y];
-    }
-    Ok(())
+pub fn reset_design(state: State<'_, Arc<AppState>>) -> Res<Arc<Build>> {
+    do_reset_design(&state).map_err(err)
 }
 
 #[derive(Serialize)]
@@ -341,20 +262,6 @@ pub fn list_boundaries(
 ) -> Res<Vec<query::Boundary>> {
     let g = state.graph().ok_or("no repository loaded")?;
     Ok(query::boundaries(&g, tag.as_deref()))
-}
-
-#[tauri::command]
-pub fn list_hotspots(
-    state: State<'_, Arc<AppState>>,
-    level: String,
-    limit: Option<usize>,
-) -> Res<Vec<query::Hotspot>> {
-    let g = state.graph().ok_or("no repository loaded")?;
-    Ok(query::hotspots(
-        &g,
-        parse_level(&level),
-        limit.unwrap_or(20),
-    ))
 }
 
 #[tauri::command]

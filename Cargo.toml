@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
   "crates/terrarium-core",
-  "crates/terrarium-layout",
   "crates/terrarium-cli",
   "app/src-tauri",
 ]
@@ -15,7 +14,6 @@ repository = "https://github.com/keithang/terrarium"
 
 [workspace.dependencies]
 terrarium-core = { path = "crates/terrarium-core" }
-terrarium-layout = { path = "crates/terrarium-layout" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

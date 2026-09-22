@@ -1,10 +1,10 @@
-// Agent hooks. The backend forwards `/select`, `/ui`, `/eval`… as `bridge:request`
+// Agent hooks. The backend forwards `/select`, `/step`, `/view`, `/tab`, `/ui`, `/eval`… as `bridge:request`
 // events; we answer with `bridge_reply`. Everything is also reachable from the
 // devtools console via `window.__terrarium`.
 
 import { api, log, on } from "./tauri";
-import { store, snapshot, select, emit } from "./store";
-import type { Renderer } from "./renderer";
+import { store, snapshot, select, emit, setStep, setTab, stepCount, type Tab } from "./store";
+import type { BrickScene, View } from "./bricks";
 import type { Actions } from "./panels";
 import { jumpTo } from "./panels";
 
@@ -14,21 +14,38 @@ interface BridgeRequest {
   payload: Record<string, unknown>;
 }
 
-export function initBridge(renderer: Renderer, actions: Actions): void {
+export function initBridge(scene: BrickScene, actions: Actions): void {
   const handlers: Record<string, (p: Record<string, unknown>) => Promise<unknown> | unknown> = {
-    state: () => ({ ...snapshot(), frame: renderer.stats() }),
-    select: async (p) => {
+    state: () => ({ ...snapshot(), frame: scene.stats() }),
+    select: (p) => {
       const id = Number(p.id);
-      await jumpTo(id);
+      jumpTo(id);
       return { ...snapshot(), selected: store.selection === id };
     },
-    focus: async (p) => {
-      const id = Number(p.id);
-      await actions.focusNode(id);
+    step: async (p) => {
+      const n = p.step == null ? stepCount() : Number(p.step);
+      if (!Number.isFinite(n) || n < 0 || n > stepCount()) return { error: `step must be 0..${stepCount()}` };
+      setStep(n);
+      await settled(450);
       return snapshot();
     },
-    level: async (p) => {
-      await actions.setLevel(String(p.level) as "package" | "file" | "symbol", p.focus == null ? null : Number(p.focus));
+    view: async (p) => {
+      if (typeof p.view === "string") {
+        if (!["iso", "front", "top"].includes(p.view)) return { error: "view must be iso, front or top" };
+        store.view = p.view as View;
+        scene.setView(store.view);
+      }
+      if (typeof p.spin === "boolean") { store.spin = p.spin; scene.setSpin(p.spin); }
+      if (p.fit) scene.fit();
+      emit("view");
+      await settled(700);
+      return snapshot();
+    },
+    tab: async (p) => {
+      const t = String(p.tab);
+      if (!["model", "manual", "parts", "traces", "design"].includes(t)) return { error: "tab must be model, manual, parts, traces or design" };
+      setTab(t as Tab);
+      await settled(250);
       return snapshot();
     },
     search: async (p) => {
@@ -40,39 +57,21 @@ export function initBridge(renderer: Renderer, actions: Actions): void {
       const results = [...document.querySelectorAll<HTMLElement>("#search-results li")].map((li) => li.textContent?.trim() ?? "");
       return { query: input.value, results, ...snapshot() };
     },
-    filter: (p) => {
-      if (Array.isArray(p.langs)) store.filters.langs = new Set(p.langs.length ? (p.langs as never[]) : ["rust", "typescript", "javascript", "python", "go", "other"]);
-      if (Array.isArray(p.edges)) store.filters.edges = new Set(p.edges.length ? (p.edges as never[]) : ["imports", "calls", "flow"]);
-      if (typeof p.tag === "string") store.filters.tag = p.tag;
-      if (typeof p.externals === "boolean") store.filters.externals = p.externals;
-      emit("filters");
-      return snapshot();
-    },
-    camera: (p) => {
-      if (p.fit) renderer.fit();
-      if (typeof p.x === "number") store.camera.x = p.x;
-      if (typeof p.y === "number") store.camera.y = p.y;
-      if (typeof p.zoom === "number") store.camera.zoom = Math.min(Math.max(p.zoom, 0.02), 12);
-      emit("camera");
-      return { camera: { ...store.camera } };
-    },
     reset: () => {
       select(null);
-      store.filters.langs = new Set(["rust", "typescript", "javascript", "python", "go", "other"]);
-      store.filters.edges = new Set(["imports", "calls", "flow"]);
-      store.filters.tag = "";
-      store.filters.externals = false;
-      store.traceOnMap = false;
-      emit("filters");
+      store.traceOnModel = false;
       emit("trace");
-      renderer.fit();
+      setStep(stepCount());
+      setTab("model");
+      scene.fit();
       return snapshot();
     },
     ui: () => uiSnapshot(),
-    click: (p) => {
+    click: async (p) => {
       const el = byTestId(String(p.testid));
       if (!el) return { error: `no element with data-testid="${p.testid}"` };
       el.click();
+      await settled(450);
       return { clicked: p.testid, ...snapshot() };
     },
     type: (p) => {
@@ -86,11 +85,11 @@ export function initBridge(renderer: Renderer, actions: Actions): void {
     },
     eval: async (p) => {
       // eslint-disable-next-line no-new-func
-      const fn = new Function("terrarium", "store", "renderer", `return (async () => { ${String(p.js).includes("return") ? String(p.js) : `return (${String(p.js)});`} })();`);
-      const result = await fn(window.__terrarium, store, renderer);
+      const fn = new Function("terrarium", "store", "scene", `return (async () => { ${String(p.js).includes("return") ? String(p.js) : `return (${String(p.js)});`} })();`);
+      const result = await fn(window.__terrarium, store, scene);
       return { result: safeJson(result) };
     },
-    screenshot: () => ({ dataUrl: renderer.snapshotDataUrl(), partial: true }),
+    screenshot: () => ({ dataUrl: scene.snapshotDataUrl(), partial: true }),
   };
 
   void on<BridgeRequest>("bridge:request", async (req) => {
@@ -109,12 +108,12 @@ export function initBridge(renderer: Renderer, actions: Actions): void {
 
   window.__terrarium = {
     store,
-    renderer,
+    scene,
     actions,
     snapshot,
     select: (id: number | null) => (id === null ? select(null) : jumpTo(id)),
     ui: uiSnapshot,
-    version: "0.1.0",
+    version: "0.2.0",
   };
 }
 
@@ -165,6 +164,12 @@ function safeJson(v: unknown): unknown {
   try { return JSON.parse(JSON.stringify(v ?? null)); } catch { return String(v); }
 }
 
+/** Two frames plus a short wait: long enough for a render and a camera ease or drop-in. */
+async function settled(ms: number): Promise<void> {
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  await sleep(ms);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -173,7 +178,7 @@ declare global {
   interface Window {
     __terrarium: {
       store: typeof store;
-      renderer: Renderer;
+      scene: BrickScene;
       actions: Actions;
       snapshot: typeof snapshot;
       select: (id: number | null) => unknown;

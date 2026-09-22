@@ -12,10 +12,9 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use terrarium_core::{Graph, NodeKind, ScanOptions, cache, query};
-use terrarium_layout::{Backend, Input, Params};
+use terrarium_core::{Graph, NodeKind, ScanOptions, build, cache, designer, query};
 
-const DESCRIPTION: &str = "Scan multi-language repositories into an architecture + dataflow graph, query it, and drive the Terrarium app";
+const DESCRIPTION: &str = "Scan multi-language repositories, build them as a brick model with a dependency-ordered manual, trace data across languages, and drive the Terrarium app";
 
 #[derive(Parser)]
 #[command(name = "terrarium", version, about = DESCRIPTION, disable_help_subcommand = true)]
@@ -128,19 +127,37 @@ enum Cmd {
     },
     /// Shortest connection between two nodes (ids or paths).
     Path { from: String, to: String },
-    /// Run the force-directed layout and report on it (GPU by default).
-    Layout {
-        #[arg(long, value_enum, default_value = "file")]
-        level: KindArg,
-        #[arg(long, default_value = "auto")]
-        backend: String,
-        #[arg(long, default_value_t = 300)]
-        iterations: u32,
-        /// Write positions JSON to this file.
-        #[arg(long, value_name = "FILE")]
-        out: Option<PathBuf>,
+    /// The repository as a brick model: size, sub-builds and the joint check
+    /// (weak joints, interlocked files, loose files).
+    Build,
+    /// The build manual: files in the order that each only rests on what came before.
+    /// Examples: `terrarium manual`, `terrarium manual --step 4`.
+    Manual {
+        /// Show one step in full (1-based).
+        #[arg(long)]
+        step: Option<usize>,
+        #[arg(long, default_value_t = 60)]
+        limit: usize,
     },
-    /// Check the toolchain, GPU, cache and app bridge.
+    /// Have Claude design the manual: one agent per sub-build reads the code and
+    /// writes steps and captions, an assembler names the model, and the engine
+    /// checks and repairs every joint. Saves the design for the app. Spends money.
+    /// Examples: `terrarium design`, `terrarium design --model claude-opus-5-5`, `terrarium design --reset`.
+    Design {
+        /// Model for the agents (default claude-opus-5-5, or TERRARIUM_DESIGN_MODEL).
+        #[arg(long)]
+        model: Option<String>,
+        /// Agents running at once.
+        #[arg(long, default_value_t = 4)]
+        parallel: usize,
+        /// Spending cap per agent, in US dollars.
+        #[arg(long, default_value_t = 2.0)]
+        budget: f64,
+        /// Forget the saved design and use the engine's.
+        #[arg(long)]
+        reset: bool,
+    },
+    /// Check the toolchain, Claude Code, cache and app bridge.
     Doctor,
     /// Drive the running Terrarium app through its local agent bridge.
     App(AppArgs),
@@ -174,45 +191,36 @@ enum AppCmd {
     },
     /// Scan and open a repository in the app.
     Open { path: PathBuf },
-    /// Full UI state: repo, level, selection, camera, layout, filters, panels.
+    /// Full UI state: repo, tab, step, view, selection, panels, build summary.
     State,
-    /// Select a node by id or path.
+    /// Select a file or symbol by id or path.
     Select { node: String },
-    /// Center the camera on a node and expand it.
-    Focus { node: String },
-    /// Switch hierarchy level.
-    Level {
-        #[arg(value_enum)]
-        level: KindArg,
-    },
     /// Search in the app's search box.
     Search { query: String },
-    /// Set visible languages / edge kinds / tags (comma-separated; empty clears).
-    Filter {
-        #[arg(long, value_delimiter = ',')]
-        langs: Option<Vec<String>>,
-        #[arg(long, value_delimiter = ',')]
-        edges: Option<Vec<String>>,
+    /// Scrub the build to a manual step (1-based; 0 is the empty baseplate; omit for the finished model).
+    Step { step: Option<usize> },
+    /// Point the camera at the model: `iso`, `front` or `top`, `--spin`, `--fit`.
+    View {
+        #[arg(value_enum)]
+        view: Option<ViewArg>,
+        /// Turn the turntable on or off.
         #[arg(long)]
-        tag: Option<String>,
-    },
-    /// Move the camera (`--x`, `--y`, `--zoom`) or fit everything (`--fit`).
-    Camera {
-        #[arg(long)]
-        x: Option<f64>,
-        #[arg(long)]
-        y: Option<f64>,
-        #[arg(long)]
-        zoom: Option<f64>,
+        spin: Option<bool>,
         #[arg(long)]
         fit: bool,
     },
-    /// Run more layout iterations in the app.
-    Layout {
-        #[arg(long, default_value_t = 200)]
-        iterations: u32,
+    /// Switch the main tab.
+    Tab {
+        #[arg(value_enum)]
+        tab: TabArg,
+    },
+    /// Have Claude design the manual in the app (blocks until done; spends money).
+    Design {
         #[arg(long)]
-        backend: Option<String>,
+        model: Option<String>,
+        /// Forget the saved design and use the engine's.
+        #[arg(long)]
+        reset: bool,
     },
     /// Save a PNG screenshot of the window.
     Screenshot {
@@ -235,7 +243,7 @@ enum AppCmd {
     },
     /// Frame timing, memory, counters.
     Metrics,
-    /// Span timings (scan, layout, IPC) aggregated since launch.
+    /// Span timings (scan, build, design, IPC) aggregated since launch.
     Profile,
     /// Evaluate JavaScript inside the webview; the result must be JSON-serialisable.
     Eval { js: String },
@@ -245,10 +253,26 @@ enum AppCmd {
     Click { testid: String },
     /// Type into an element by its data-testid.
     Type { testid: String, text: String },
-    /// Clear selection, filters and camera.
+    /// Clear selection and highlights, show the finished model, fit the camera.
     Reset,
     /// Quit the app.
     Quit,
+}
+
+#[derive(Clone, Copy, ValueEnum, Debug)]
+enum ViewArg {
+    Iso,
+    Front,
+    Top,
+}
+
+#[derive(Clone, Copy, ValueEnum, Debug)]
+enum TabArg {
+    Model,
+    Manual,
+    Parts,
+    Traces,
+    Design,
 }
 
 #[derive(Clone, Copy, ValueEnum, Debug)]
@@ -672,73 +696,53 @@ fn run(cli: Cli) -> Result<Value> {
                 ),
             }
         }
-        Some(Cmd::Layout {
-            level,
-            backend,
-            iterations,
-            out,
-        }) => {
+        Some(Cmd::Build) => {
             let g = load_graph(&root)?;
-            let backend: Backend = backend.parse().map_err(|e: String| anyhow!(e))?;
-            let view = g.view(level.into(), None);
-            let input = layout_input(&view);
-            let (positions, report) =
-                terrarium_layout::layout(&input, Params::default(), backend, iterations)?;
-            if let Some(o) = &out {
-                let rows: Vec<Value> = view
-                    .nodes
-                    .iter()
-                    .zip(&positions)
-                    .map(|(n, p)| json!({ "id": n.id, "x": p[0], "y": p[1] }))
-                    .collect();
-                std::fs::write(o, serde_json::to_vec(&rows)?)?;
+            let b = build::for_graph(&g, cache::load_design(Path::new(&g.root)));
+            Ok(build_value(&g, &b, true))
+        }
+        Some(Cmd::Manual { step, limit }) => {
+            let g = load_graph(&root)?;
+            let b = build::for_graph(&g, cache::load_design(Path::new(&g.root)));
+            manual_value(&b, step, limit)
+        }
+        Some(Cmd::Design { model, parallel, budget, reset }) => {
+            let g = load_graph(&root)?;
+            let groot = Path::new(&g.root).to_path_buf();
+            if reset {
+                let had = cache::clear_design(&groot)?;
+                let b = build::for_graph(&g, None);
+                let mut v = build_value(&g, &b, false);
+                v["design"] = json!(if had { "reset to the engine's design" } else { "already the engine's design (no-op)" });
+                return Ok(v);
             }
-            let mut v = serde_json::to_value(&report)?;
-            if let Some(o) = out {
-                v["out"] = json!(o.to_string_lossy());
+            let mut opts = designer::Options { parallel, budget_usd: budget, ..designer::Options::default() };
+            if let Some(m) = model {
+                opts.model = m;
+            }
+            let runner = designer::claude_runner(&groot, &opts);
+            // Progress is for people watching; agents read the result on stdout.
+            let progress = |p: designer::Progress| eprintln!("{}", serde_json::to_string(&p).unwrap_or_default());
+            let (design, run) = designer::design(&g, &opts, &runner, &progress)?;
+            cache::store_design(&groot, &design)?;
+            let b = build::for_graph(&g, Some(design));
+            let mut v = json!({
+                "run": {
+                    "model": run.model,
+                    "cost_usd": (run.cost_usd * 100.0).round() / 100.0,
+                    "secs": run.secs.round(),
+                    "agents": run.agents.iter().map(|a| json!({ "role": a.role, "ok": a.ok, "cost_usd": (a.cost_usd * 100.0).round() / 100.0, "secs": a.secs.round(), "error": a.error.clone().unwrap_or_default() })).collect::<Vec<_>>(),
+                },
+            });
+            let summary = build_value(&g, &b, false);
+            for (k, val) in summary.as_object().unwrap() {
+                v[k] = val.clone();
             }
             Ok(v)
         }
         Some(Cmd::Doctor) => doctor(&root),
         Some(Cmd::App(a)) => app(a.cmd),
         Some(Cmd::Setup { target, global }) => setup::install(target, global),
-    }
-}
-
-pub fn layout_input(view: &terrarium_core::ViewGraph) -> Input {
-    let index: std::collections::HashMap<u32, u32> = view
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.id, i as u32))
-        .collect();
-    let mut group_ids: std::collections::HashMap<u32, u32> = Default::default();
-    let groups: Vec<u32> = view
-        .nodes
-        .iter()
-        .map(|n| {
-            if n.external {
-                return terrarium_layout::NO_GROUP;
-            }
-            let next = group_ids.len() as u32;
-            *group_ids.entry(n.group).or_insert(next)
-        })
-        .collect();
-    let mass: Vec<f32> = view
-        .nodes
-        .iter()
-        .map(|n| (1.0 + (n.loc as f32).ln_1p() * 0.25 + (n.degree as f32).sqrt() * 0.15).min(6.0))
-        .collect();
-    let edges: Vec<(u32, u32, f32)> = view
-        .edges
-        .iter()
-        .filter_map(|e| Some((*index.get(&e.from)?, *index.get(&e.to)?, e.weight as f32)))
-        .collect();
-    Input {
-        positions: vec![],
-        edges,
-        groups,
-        mass,
     }
 }
 
@@ -749,6 +753,91 @@ fn kind_label(k: NodeKind) -> &'static str {
         NodeKind::File => "file",
         NodeKind::Symbol => "symbol",
     }
+}
+
+/// The build summary every build-related command prints.
+fn build_value(g: &Graph, b: &build::Build, with_help: bool) -> Value {
+    let c = &b.check;
+    let d = &b.design;
+    let files_in = |id: &str| d.steps.iter().filter(|s| s.sub_build == id).map(|s| s.files.len()).sum::<usize>();
+    let mut v = json!({
+        "build": {
+            "title": d.title,
+            "source": match &d.model { Some(m) => format!("{} ({m})", d.source), None => d.source.clone() },
+            "summary": d.summary,
+            "pieces": c.pieces,
+            "steps": c.steps,
+            "sub_builds": c.sub_builds,
+            "studs": format!("{}x{}", b.model.studs.0, b.model.studs.1),
+            "joints": c.joints,
+            "bridges": c.bridges,
+            "check": if c.ok { "holds together: 0 weak joints".to_string() } else { format!("{} weak joints", c.weak.len()) },
+        },
+        "sub_builds": d.sub_builds.iter().map(|s| json!({ "id": s.id, "name": s.name, "files": files_in(&s.id), "steps": d.steps.iter().filter(|x| x.sub_build == s.id).count() })).collect::<Vec<_>>(),
+    });
+    if !c.weak.is_empty() {
+        v["weak"] = json!(c.weak.iter().map(|w| json!({ "kind": w.kind, "file": w.file, "detail": w.detail })).collect::<Vec<_>>());
+    }
+    if !c.repairs.is_empty() {
+        v["repairs"] = json!(c.repairs);
+    }
+    v["interlocked"] = if c.interlocked.is_empty() { json!("none: no files depend on each other in a cycle") } else { json!(c.interlocked.iter().map(|g| g.join(" ")).collect::<Vec<_>>()) };
+    v["loose"] = if c.loose.is_empty() { json!("none") } else { json!(c.loose) };
+    v["gaps"] = json!(format!("{} endpoints with no caller or no handler", c.gaps));
+    if let Some(st) = &b.stale {
+        v["stale"] = json!(st);
+    }
+    let _ = g;
+    if with_help {
+        let mut help = vec!["Run `terrarium manual` for the steps in reading order".to_string()];
+        if d.source == "engine" {
+            help.push("Run `terrarium design` to have Claude write the manual (spends money)".into());
+        } else {
+            help.push("Run `terrarium design --reset` to go back to the engine's manual".into());
+        }
+        if c.gaps > 0 {
+            help.push("Run `terrarium endpoints --gaps` for the gaps".into());
+        }
+        v["help"] = json!(help);
+    }
+    v
+}
+
+fn manual_value(b: &build::Build, step: Option<usize>, limit: usize) -> Result<Value> {
+    let d = &b.design;
+    let name_of = |id: &str| d.sub_builds.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string());
+    if let Some(n) = step {
+        let s = d.steps.get(n.wrapping_sub(1)).ok_or_else(|| anyhow!("no step {n}: the manual has {} steps", d.steps.len()))?;
+        let mut v = json!({
+            "step": format!("{n} of {}", d.steps.len()),
+            "sub_build": name_of(&s.sub_build),
+            "title": s.title,
+            "caption": s.caption,
+            "files": s.files,
+        });
+        let mut help = vec![];
+        if n > 1 {
+            help.push(format!("Run `terrarium manual --step {}` for the previous step", n - 1));
+        }
+        if n < d.steps.len() {
+            help.push(format!("Run `terrarium manual --step {}` for the next step", n + 1));
+        }
+        v["help"] = json!(help);
+        return Ok(v);
+    }
+    let total = d.steps.len();
+    let rows: Vec<Value> = d
+        .steps
+        .iter()
+        .enumerate()
+        .take(limit)
+        .map(|(i, s)| json!({ "n": i + 1, "sub_build": name_of(&s.sub_build), "title": s.title, "files": s.files.iter().map(|f| f.rsplit('/').next().unwrap_or(f)).collect::<Vec<_>>().join(" ") }))
+        .collect();
+    let mut help = vec!["Run `terrarium manual --step <n>` for a step's caption and full paths".to_string()];
+    if total > limit {
+        help.push(format!("Run `terrarium manual --limit {total}` for all {total} steps"));
+    }
+    Ok(json!({ "manual": format!("{} by {}", d.title, d.source), "count": format!("{} of {total} steps", rows.len()), "steps": rows, "help": help }))
 }
 
 fn stats_value(g: &Graph) -> Value {
@@ -794,6 +883,8 @@ fn home(root: &Path) -> Result<Value> {
     if v["repo"].is_string() {
         help.push("Run `terrarium scan` to analyse this repository".to_string());
     } else {
+        help.push("Run `terrarium build` for the brick model and its joint check".to_string());
+        help.push("Run `terrarium manual` for the files in reading order".to_string());
         help.push("Run `terrarium traces` for end-to-end paths across languages".to_string());
         help.push("Run `terrarium endpoints --gaps` for routes nobody calls and calls nobody serves".to_string());
         help.push(
@@ -808,13 +899,20 @@ fn home(root: &Path) -> Result<Value> {
             "Run `terrarium app state` / `terrarium app screenshot` to inspect the app".to_string(),
         );
     }
-    help.push("Run `terrarium doctor` to check GPU and toolchain".to_string());
+    help.push("Run `terrarium doctor` to check Claude Code and the toolchain".to_string());
     v["help"] = json!(help);
     Ok(v)
 }
 
 fn doctor(root: &Path) -> Result<Value> {
-    let gpu = terrarium_layout::gpu_info();
+    let claude = designer::find_claude();
+    let claude_version = std::process::Command::new(&claude)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     let b = bridge::Bridge::discover();
     let app = match b.get("/health") {
         Ok(h) => {
@@ -827,7 +925,10 @@ fn doctor(root: &Path) -> Result<Value> {
     Ok(json!({
         "bin": bin_path(),
         "version": env!("CARGO_PKG_VERSION"),
-        "gpu": { "available": gpu.available, "adapter": gpu.adapter, "backend": gpu.backend, "device_type": gpu.device_type },
+        "claude": match &claude_version {
+            Some(v) => json!({ "available": true, "bin": claude.to_string_lossy(), "version": v, "design_model": designer::Options::default().model }),
+            None => json!({ "available": false, "bin": claude.to_string_lossy(), "detail": "`terrarium design` needs Claude Code; install it or set TERRARIUM_CLAUDE" }),
+        },
         "cache": { "dir": home.to_string_lossy(), "graphs": idx.entries.len(), "current_repo_cached": cache::find_entry(root).is_some() },
         "app": app,
         "languages": ["rust", "typescript", "javascript", "python", "go"],
@@ -897,24 +998,20 @@ fn app(cmd: AppCmd) -> Result<Value> {
         AppCmd::Open { path } => b.post("/scan", json!({ "path": abs(&path)? })),
         AppCmd::State => b.get("/state"),
         AppCmd::Select { node } => b.post("/select", json!({ "node": node })),
-        AppCmd::Focus { node } => b.post("/focus", json!({ "node": node })),
-        AppCmd::Level { level } => b.post("/level", json!({ "level": kind_label(level.into()) })),
         AppCmd::Search { query } => b.post("/search", json!({ "q": query })),
-        AppCmd::Filter { langs, edges, tag } => b.post(
-            "/filter",
-            json!({ "langs": langs, "edges": edges, "tag": tag }),
+        AppCmd::Step { step } => b.post("/step", json!({ "step": step })),
+        AppCmd::View { view, spin, fit } => b.post(
+            "/view",
+            json!({ "view": view.map(|v| format!("{v:?}").to_lowercase()), "spin": spin, "fit": fit }),
         ),
-        AppCmd::Camera { x, y, zoom, fit } => b.post(
-            "/camera",
-            json!({ "x": x, "y": y, "zoom": zoom, "fit": fit }),
-        ),
-        AppCmd::Layout {
-            iterations,
-            backend,
-        } => b.post(
-            "/layout",
-            json!({ "iterations": iterations, "backend": backend }),
-        ),
+        AppCmd::Tab { tab } => b.post("/tab", json!({ "tab": format!("{tab:?}").to_lowercase() })),
+        AppCmd::Design { model, reset } => {
+            if reset {
+                b.post("/design/reset", json!({}))
+            } else {
+                b.post_long("/design", json!({ "model": model }))
+            }
+        }
         AppCmd::Screenshot { out } => {
             let bytes = b.get_bytes("/screenshot")?;
             std::fs::write(&out, &bytes)?;

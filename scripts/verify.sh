@@ -40,34 +40,46 @@ expect "flows" "ipc scan_repo" "$T" --repo fixtures/polyglot flows
 expect "traces" "app.ts#main,4,typescript>python>rust>go" "$T" --repo fixtures/polyglot traces
 expect "trace" "store.go#open:13\",call,db" "$T" --repo fixtures/polyglot trace web/src/app.ts#main
 expect "endpoints" "api/reports,no-handler" "$T" --repo fixtures/polyglot endpoints --gaps
-expect "layout" "^backend: (gpu|cpu)" "$T" --repo fixtures/polyglot layout --backend auto --iterations 50
-grep -q "^backend: gpu" "$OUT/layout.toon" || echo "   (auto picked cpu for this small graph; gpu path covered by the layout crate's tests)"
+expect "build" "check: \"holds together: 0 weak joints\"" "$T" --repo fixtures/polyglot build
+expect "manual" "Add commands.rs" "$T" --repo fixtures/polyglot manual
+expect "manual step" "rests on jobs.rs" "$T" --repo fixtures/polyglot manual --step 4
+expect "doctor" "^claude:" "$T" doctor
 
 step "launch app"
 "$T" app quit >/dev/null 2>&1
 sleep 0.5
 expect "launch" "graph_loaded: true" "$T" app launch fixtures/polyglot
 
-step "trace stage"
+step "brick model"
 sleep 0.5
-expect "stage" "stage: traces" "$T" app state
+expect "state" "tab: model" "$T" app state
+expect "chips" "holds together" "$T" app ui
+expect "step" "step_title: Add commands.rs" "$T" app step 4
+expect "empty plate" "^step: 0" "$T" app step 0
+expect "manual" "tab: manual" "$T" app tab manual
+expect "manual page" "page-title" "$T" app ui
+expect "finished" "^step: 10" "$T" app step
+expect "view" "^view: top" "$T" app view top
+expect "parts" "tab: parts" "$T" app tab parts
+expect "parts ui" "parts-table" "$T" app ui
+expect "design tab" "tab: design" "$T" app tab design
+expect "design ui" "engine design" "$T" app ui
+
+step "traces"
+expect "endpoint" "tab: traces" "$T" app click "endpoint-http /api/jobs"
 expect "trace ui" "Crosses 4 boundaries through TypeScript, Python, Rust and Go" "$T" app ui
-expect "endpoint" "trace: native/src/lib.rs#run|trace: web/src/app.ts#main" "$T" app click "endpoint-http /api/jobs"
-expect "show on map" "stage: map" "$T" app click trace-show-map
+expect "show on model" "trace_on_model: true" "$T" app click trace-show-model
 
 step "bridge checks"
 expect "select" "selection_path: web/src/api.ts" "$T" app select web/src/api.ts
 expect "ui" "title: api.ts" "$T" app ui
-expect "focus" "^focus: [0-9]+" "$T" app focus web/src/api.ts
-expect "level" "^level: symbol" "$T" app level symbol
 expect "search" "fetchUsers" "$T" app search fetch
-expect "filter" "nodes_visible" "$T" app filter --langs python --edges flow
-expect "reset" "graph_loaded: true" "$T" app reset
+expect "reset" "trace_on_model: false" "$T" app reset
 expect "metrics" "frontend_errors: 0" "$T" app metrics
 expect "warnings" "^count: 0" "$T" app logs --level warn
-expect "profile" "layout_run" "$T" app profile
+expect "profile" "assemble_build" "$T" app profile
 expect "screenshot" "^bytes: [0-9]{4,}" "$T" app screenshot --out "$OUT/app.png"
-expect "eval" "result: [1-9]" "$T" app eval 'store.nodes.length'
+expect "eval" "result: [1-9]" "$T" app eval 'store.build.model.bricks.length'
 
 step "quit"
 "$T" app quit >/dev/null
