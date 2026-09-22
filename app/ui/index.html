@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Terrarium</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="titlebar" data-tauri-drag-region></div>
+    <canvas id="gl" data-testid="canvas"></canvas>
+    <canvas id="labels"></canvas>
+
+    <aside id="shelf" data-testid="shelf" data-panel="shelf">
+      <div class="shelf-search">
+        <input id="search" data-testid="search" type="search" placeholder="Find a file, symbol or package" autocomplete="off" spellcheck="false" />
+        <ul id="search-results" data-testid="search-results" hidden></ul>
+      </div>
+      <nav class="tabs" role="tablist">
+        <button class="tab is-active" data-tab="packages" data-testid="tab-packages" role="tab">Packages</button>
+        <button class="tab" data-tab="flows" data-testid="tab-flows" role="tab">Flows</button>
+        <button class="tab" data-tab="boundaries" data-testid="tab-boundaries" role="tab">Boundaries</button>
+      </nav>
+      <section class="tab-panel is-active" data-tab-panel="packages" data-testid="packages"></section>
+      <section class="tab-panel" data-tab-panel="flows" data-testid="flows"></section>
+      <section class="tab-panel" data-tab-panel="boundaries" data-testid="boundaries"></section>
+      <footer class="legend" data-testid="legend"></footer>
+    </aside>
+
+    <aside id="card" data-testid="card" data-panel="card" hidden></aside>
+
+    <footer id="bench" data-testid="bench" data-panel="bench">
+      <button id="repo-name" class="bench-repo" data-testid="repo-name" title="Open another repository">No repository</button>
+      <div class="segmented" role="group" aria-label="Level">
+        <button data-level="package" data-testid="level-package">Packages</button>
+        <button data-level="file" data-testid="level-file" class="is-active">Files</button>
+        <button data-level="symbol" data-testid="level-symbol">Symbols</button>
+      </div>
+      <button id="layout-status" class="bench-pill" data-testid="layout-status" title="Run the layout again">layout idle</button>
+      <span id="counts" class="bench-text" data-testid="counts"></span>
+      <span id="fps" class="bench-text" data-testid="fps"></span>
+      <span id="bridge" class="bench-pill is-quiet" data-testid="bridge" title="Local agent bridge">bridge starting</span>
+      <button id="help-btn" class="bench-pill is-quiet" data-testid="help" title="Keyboard shortcuts">?</button>
+    </footer>
+
+    <div id="empty" class="overlay" data-testid="empty">
+      <div class="jar">
+        <svg viewBox="0 0 160 200" width="160" height="200" aria-hidden="true">
+          <defs>
+            <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#2E3D35" stop-opacity=".9"/>
+              <stop offset="1" stop-color="#1F2A24" stop-opacity=".95"/>
+            </linearGradient>
+            <radialGradient id="lamp" cx=".5" cy=".5" r=".5">
+              <stop offset="0" stop-color="#F2B950" stop-opacity=".9"/>
+              <stop offset="1" stop-color="#F2B950" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <rect x="44" y="12" width="72" height="14" rx="5" fill="#C99A3C"/>
+          <path d="M30 40 Q30 24 46 24 H114 Q130 24 130 40 V170 Q130 190 110 190 H50 Q30 190 30 170 Z" fill="url(#glass)" stroke="#D9E4DA" stroke-opacity=".25"/>
+          <path d="M36 150 Q80 120 124 150 V172 Q124 184 112 184 H48 Q36 184 36 172 Z" fill="#2E241C"/>
+          <ellipse cx="80" cy="150" rx="40" ry="16" fill="#8FBF6A"/>
+          <ellipse cx="62" cy="144" rx="14" ry="9" fill="#A3CF7E"/>
+          <circle cx="98" cy="96" r="34" fill="url(#lamp)"/>
+          <circle cx="98" cy="96" r="7" fill="#F2B950"/>
+          <path d="M40 40 V160" stroke="#D9E4DA" stroke-opacity=".12" stroke-width="3" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <h1>A quiet place to watch a codebase</h1>
+      <p>Open a repository and Terrarium grows a map of its packages, files and symbols, with the data flows between languages lit up.</p>
+      <div class="empty-actions">
+        <button id="open-btn" class="primary" data-testid="open-repo">Open a repository</button>
+        <span class="hint">or drop a folder here</span>
+      </div>
+      <ul id="recent" class="recent" data-testid="recent"></ul>
+    </div>
+
+    <div id="scanning" class="overlay" data-testid="scanning" hidden>
+      <div class="spinner"></div>
+      <h2>Growing the graph</h2>
+      <p id="scanning-path" class="mono"></p>
+    </div>
+
+    <div id="help" class="overlay is-sheet" data-testid="help-overlay" hidden>
+      <div class="sheet">
+        <h2>Keyboard</h2>
+        <dl class="keys">
+          <dt>⌘O</dt><dd>Open a repository</dd>
+          <dt>/</dt><dd>Search</dd>
+          <dt>1 2 3</dt><dd>Packages, files, symbols</dd>
+          <dt>F</dt><dd>Fit everything in view</dd>
+          <dt>L</dt><dd>Settle the layout again</dd>
+          <dt>Esc</dt><dd>Clear selection</dd>
+          <dt>Double-click</dt><dd>Open a node one level deeper</dd>
+          <dt>Scroll · pinch</dt><dd>Pan · zoom</dd>
+        </dl>
+        <p class="hint">Agents: <code>terrarium app state</code>, <code>terrarium app screenshot</code>, or GET <code id="help-bridge">http://127.0.0.1</code></p>
+        <button class="primary" data-testid="help-close">Close</button>
+      </div>
+    </div>
+
+    <div id="toasts" data-testid="toasts" aria-live="polite"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

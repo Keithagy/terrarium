@@ -1,0 +1,45 @@
+[package]
+name = "terrarium-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terrarium: a cozy macOS app for watching a repository's architecture and data flows"
+
+[lib]
+name = "terrarium_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "terrarium-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+terrarium-core.workspace = true
+terrarium-layout.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tauri = { version = "2", features = ["macos-private-api", "devtools"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+window-vibrancy = "0.6"
+axum = { version = "0.8", features = ["json", "query"] }
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros"] }
+tower-http = { version = "0.6", features = ["cors"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+memory-stats = "1"
+time = { version = "0.3", features = ["formatting"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSError", "NSGeometry", "NSString"] }
+objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration"] }
+block2 = "0.6"
+
+[features]
+default = []

@@ -1,0 +1,22 @@
+[package]
+name = "terrarium-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent-friendly CLI for terrarium: scan repositories, query the graph, drive the app"
+
+[[bin]]
+name = "terrarium"
+path = "src/main.rs"
+
+[dependencies]
+terrarium-core.workspace = true
+terrarium-layout.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }
+ureq = { version = "3", features = ["json"] }
+dirs = "6"

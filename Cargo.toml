@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/terrarium-core",
+  "crates/terrarium-layout",
+  "crates/terrarium-cli",
+  "app/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/keithang/terrarium"
+
+[workspace.dependencies]
+terrarium-core = { path = "crates/terrarium-core" }
+terrarium-layout = { path = "crates/terrarium-layout" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+rayon = "1"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+# Tree-sitter grammars are slow to parse at opt-level 0; always optimise them.
+[profile.dev.package."*"]
+opt-level = 2

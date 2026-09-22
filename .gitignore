@@ -1,0 +1,8 @@
+target/
+node_modules/
+dist/
+app/ui/dist/
+app/src-tauri/gen/
+.terrarium/
+*.log
+.DS_Store
