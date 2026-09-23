@@ -1,19 +1,15 @@
-// DOM panels: header chips, shelf (search, sub-builds, legend; traces and
-// endpoints live in traces.ts), specimen card, overlays and toasts.
+// DOM panels: header, shelf (search, map, journeys, guide), the annotation card,
+// the journey bar, overlays and toasts.
 
 import { api, log } from "./tauri";
-import { store, subscribe, emit, select, setTab, setStep, stepCount, buildingForNode, buildingAt } from "./store";
-import { LANG_LABEL, type Lang, type NodeDetail } from "./types";
-import { traceFrom } from "./traces";
+import { store, subscribe, emit, select, selectRelationship, setLevel, setJourney, setJourneyStep, zoomInto, elementById, elementName, shownContainers, containerOf, relationshipsOf, relKey, componentOfFile, type ShelfTab } from "./store";
+import { EXTERNAL_LABEL, KIND_LABEL, langOf, type Journey, type Relationship } from "./types";
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T;
 
 export interface Actions {
   openRepo(path?: string): Promise<void>;
-  /** Point the camera at a building (or a district's buildings). */
-  focusBuilding(index: number): void;
-  focusDistrict(index: number | null): void;
-  showTraceOnModel(): void;
+  copyDsl(): Promise<void>;
 }
 
 let actions: Actions;
@@ -33,10 +29,12 @@ export function initPanels(a: Actions): void {
   initHeader();
   initEmpty();
   initHelp();
-  subscribe("build", () => { renderChips(); renderSubBuilds(); renderLegend(); });
-  subscribe("selection", () => { void renderCard(); renderSubBuilds(); });
-  subscribe("tab", () => { void renderCard(); });
-  subscribe("trace", renderLegend);
+  initJourneyBar();
+  subscribe("atlas", () => { renderChips(); renderMap(); renderJourneys(); renderGuide(); });
+  subscribe("level", () => { renderMap(); });
+  subscribe("selection", () => { renderCard(); renderMap(); });
+  subscribe("journey", () => { renderJourneys(); renderJourneyBar(); });
+  subscribe("discovery", () => { renderCard(); });
   subscribe("repo", () => { renderChips(); renderOverlays(); });
   subscribe("ui", () => { renderChips(); renderOverlays(); renderBridge(); });
   renderOverlays();
@@ -46,17 +44,17 @@ export function initPanels(a: Actions): void {
 
 function initHeader(): void {
   $("#repo-name").addEventListener("click", () => void actions.openRepo());
+  $("#dsl-btn").addEventListener("click", () => void actions.copyDsl());
 }
 
 function renderChips(): void {
   const repo = $("#repo-name");
-  const b = store.build;
-  repo.textContent = b ? b.design.title : store.repo ? store.repo.split("/").filter(Boolean).pop() ?? store.repo : "No repository";
+  const a = store.atlas;
+  repo.textContent = a ? a.system.name : store.repo ? store.repo.split("/").filter(Boolean).pop() ?? store.repo : "No repository";
   repo.title = store.repo ? `${store.repo}\nClick to open another repository` : "Open a repository";
   const el = $("#chips");
   el.innerHTML = "";
-  if (!b) return;
-  const c = b.check;
+  if (!a) return;
   const chip = (text: string, testid: string, title: string, cls = "") => {
     const s = document.createElement("span");
     s.className = `hchip ${cls}`;
@@ -65,18 +63,14 @@ function renderChips(): void {
     s.innerHTML = text;
     el.appendChild(s);
   };
-  chip(`<b>${c.pieces.toLocaleString()}</b> pieces`, "chip-pieces", "Bricks: one per function, type or constant (large files share bricks)");
-  chip(`<b>${c.steps}</b> steps`, "chip-steps", "Manual steps, in an order where every file only rests on files built before it");
-  chip(`<b>${c.sub_builds}</b> sub-builds`, "chip-sub-builds", "Packages, built as districts");
-  chip(`<b>${b.model.studs[0]}×${b.model.studs[1]}</b> studs`, "chip-studs", "Baseplate size");
-  chip(`<b>${c.joints.toLocaleString()}</b> joints`, "chip-joints", "Imports and calls between files: what holds the model together");
-  if (c.ok) chip("holds together", "chip-check", "Every file is placed after everything it rests on", "is-ok");
-  else chip(`${c.weak.length} weak ${c.weak.length === 1 ? "joint" : "joints"}`, "chip-check", "See the Design tab", "is-weak");
-  const who = b.design.source === "engine" ? "engine design" : `designed by ${b.design.model ?? b.design.source}`;
-  chip(esc(who), "chip-source", b.design.source === "engine" ? "The engine grouped and captioned the steps. Design with Claude for a manual written by agents that read the code." : `Claude agents wrote the sub-build names, steps and captions; the engine checked every joint${b.stale ? `\n${b.stale}` : ""}`, b.design.source === "engine" ? "is-quiet" : "is-claude");
-  const btn = $<HTMLButtonElement>("#design-btn");
-  btn.disabled = store.design.running || !store.graphLoaded;
-  btn.textContent = store.design.running ? `Designing… ${store.design.done}/${store.design.agents}` : b.design.source === "engine" ? "Design with Claude" : "Redesign with Claude";
+  const cs = shownContainers();
+  const comps = cs.reduce((n, c) => n + c.components.length, 0);
+  chip(`<b>${cs.length}</b> containers`, "chip-containers", "The things that run: web apps, services, workers, command lines, libraries");
+  chip(`<b>${comps}</b> components`, "chip-components", "The parts inside the containers");
+  chip(`<b>${a.relationships.length}</b> relationships`, "chip-relationships", "Arrows on the diagrams");
+  chip(`<b>${a.report.backed}</b> backed by code`, "chip-backed", "Relationships the engine found in imports, calls and flows; click one to see the evidence", "is-ok");
+  if (a.report.claimed) chip(`<b>${a.report.claimed}</b> claimed`, "chip-claimed", "Relationships an agent asserted that the code does not show; drawn dashed", "is-weak");
+  chip(a.source === "engine" ? "engine draft" : `discovered by ${esc(a.model ?? "claude")}`, "chip-source", a.source === "engine" ? "Names come from folders and manifests. Discover with Claude to have agents read the code." : `Agents read the code and named every part; the engine checked every relationship${store.stale ? `\n${store.stale}` : ""}`, a.source === "engine" ? "is-quiet" : "is-claude");
 }
 
 // ---- shelf --------------------------------------------------------------------
@@ -85,7 +79,7 @@ function initShelf(): void {
   const input = $<HTMLInputElement>("#search");
   const results = $<HTMLUListElement>("#search-results");
   let active = -1;
-  let hits: { id: number; name: string; path: string; kind: string; lang: string }[] = [];
+  let hits: { id: string; name: string; path: string; kind: string; lang: string }[] = [];
   const render = () => {
     results.innerHTML = "";
     results.hidden = hits.length === 0;
@@ -114,12 +108,24 @@ function initShelf(): void {
     clearTimeout(timer);
     if (!input.value.trim()) { hits = []; render(); return; }
     timer = window.setTimeout(async () => {
+      const q = input.value.trim().toLowerCase();
+      // Atlas elements first (by name), then files and symbols from the graph.
+      const local: typeof hits = [];
+      const a = store.atlas;
+      if (a) {
+        for (const c of shownContainers()) {
+          if (c.name.toLowerCase().includes(q) || c.package.toLowerCase().includes(q)) local.push({ id: c.id, name: c.name, path: `container · ${c.package}`, kind: "container", lang: langOf(c.technology, c.language) });
+          for (const k of c.components) if (k.name.toLowerCase().includes(q)) local.push({ id: k.id, name: k.name, path: `component in ${c.name}`, kind: "component", lang: langOf(k.technology || c.technology, c.language) });
+        }
+        for (const x of a.externals) if (x.name.toLowerCase().includes(q)) local.push({ id: x.id, name: x.name, path: EXTERNAL_LABEL[x.kind], kind: "external", lang: "other" });
+        for (const j of a.journeys) if (j.name.toLowerCase().includes(q)) local.push({ id: j.id, name: j.name, path: `journey from ${j.entry}`, kind: "journey", lang: "other" });
+      }
       try {
-        // The model has files and symbols; packages are districts on the shelf.
-        hits = (await api.search(input.value, 20)).filter((h) => h.kind === "file" || h.kind === "symbol").slice(0, 12);
-        active = hits.length ? 0 : -1;
-        render();
-      } catch (e) { log("warn", `search failed: ${String(e)}`); }
+        const remote = (await api.search(input.value, 20)).filter((h) => h.kind === "file" || h.kind === "symbol").map((h) => ({ id: `path:${h.path}`, name: h.name, path: h.path, kind: h.kind, lang: h.lang }));
+        hits = [...local.slice(0, 6), ...remote].slice(0, 12);
+      } catch (e) { log("warn", `search failed: ${String(e)}`); hits = local.slice(0, 12); }
+      active = hits.length ? 0 : -1;
+      render();
     }, 90);
   });
   input.addEventListener("keydown", (e) => {
@@ -130,154 +136,287 @@ function initShelf(): void {
   });
   input.addEventListener("blur", () => { setTimeout(() => { hits = []; render(); }, 120); });
   document.querySelectorAll<HTMLButtonElement>(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => setShelfTab(tab.dataset.tab as typeof store.shelfTab));
+    tab.addEventListener("click", () => setShelfTab(tab.dataset.tab as ShelfTab));
   });
 }
 
-export function setShelfTab(t: typeof store.shelfTab): void {
+export function setShelfTab(t: ShelfTab): void {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("is-active", (x as HTMLElement).dataset.tab === t));
   document.querySelectorAll<HTMLElement>(".tab-panel").forEach((p) => p.classList.toggle("is-active", p.dataset.tabPanel === t));
   store.shelfTab = t;
   emit("ui");
 }
 
-/** Select a file or symbol and bring its building into view, finishing the model if the step hides it. */
-export function jumpTo(id: number): void {
-  const bi = buildingForNode(id);
-  if (bi === null) {
-    toast("That is not part of the model (packages are the districts on the shelf)", "info");
+/** Show an element on the right diagram and select it. Accepts ids, `path:<file>` and journey ids. */
+export function jumpTo(id: string): void {
+  if (id.startsWith("path:")) {
+    const k = componentOfFile(id.slice(5));
+    if (!k) { toast("That file is not in any component", "info"); return; }
+    setLevel("code", k);
+    select(k);
     return;
   }
-  if (store.tab !== "model" && store.tab !== "manual") setTab("model");
-  const b = buildingAt(bi)!;
-  if (b.step >= store.step) setStep(stepCount());
-  select(id);
-  actions.focusBuilding(bi);
+  if (id.startsWith("j:")) {
+    const j = store.atlas?.journeys.find((x) => x.id === id);
+    if (j) playJourney(j);
+    return;
+  }
+  const e = elementById(id);
+  if (!e) return;
+  if (e.kind === "component") setLevel("components", e.container.id);
+  else if (e.kind === "container") { if (store.level !== "containers" && !(store.level === "components" && store.focus === e.container.id)) setLevel("containers"); }
+  else if (e.kind === "system") setLevel("context");
+  else if (store.level === "code") setLevel("containers");
+  select(id === "s" ? "s" : id);
 }
 
-const openDistricts = new Set<string>();
+const openContainers = new Set<string>();
 
-function renderSubBuilds(): void {
-  const el = $("[data-tab-panel=sub-builds]");
+function renderMap(): void {
+  const el = $("[data-tab-panel=map]");
+  const a = store.atlas;
   el.innerHTML = "";
-  const b = store.build;
-  if (!b) return;
-  const selB = store.selection !== null ? buildingForNode(store.selection) : null;
+  if (!a) return;
   const frag = document.createDocumentFragment();
-  b.model.districts.forEach((d, di) => {
-    const sb = b.design.sub_builds.find((s) => s.id === d.sub_build);
-    const steps = b.design.steps.map((s, i) => [s, i] as const).filter(([s]) => s.sub_build === d.sub_build).map(([, i]) => i + 1);
-    const buildings = b.model.buildings.map((x, i) => [x, i] as const).filter(([x]) => x.district === di);
-    const open = openDistricts.has(d.sub_build) || buildings.some(([, i]) => i === selB);
+  const sys = document.createElement("button");
+  sys.className = `map-row is-system${store.selection === "s" ? " is-selected" : ""}`;
+  sys.dataset.testid = "map-system";
+  sys.innerHTML = `<span class="name">${esc(a.system.name)}</span><span class="meta">system context</span>`;
+  sys.addEventListener("click", () => { setLevel("context"); select("s"); });
+  frag.appendChild(sys);
+  for (const c of shownContainers()) {
+    const open = openContainers.has(c.id) || store.focus === c.id || (store.selection ? containerOf(store.selection)?.id === c.id : false);
     const head = document.createElement("button");
-    head.className = `district-row${open ? " is-open" : ""}`;
-    head.dataset.testid = `district-${d.sub_build}`;
-    head.innerHTML = `
-      <span class="dr-top"><span class="dot" data-lang="${d.lang}"></span><span class="name">${esc(sb?.name ?? d.name)}</span><span class="meta">${buildings.length} ${buildings.length === 1 ? "file" : "files"}</span></span>
-      ${sb?.blurb ? `<span class="dr-blurb">${prose(sb.blurb)}</span>` : ""}
-      <span class="dr-steps">${steps.length ? `steps ${steps[0]}${steps.length > 1 ? `–${steps[steps.length - 1]}` : ""}` : ""}${sb && sb.name !== sb.package ? ` · ${esc(sb.package)}` : ""}</span>`;
+    head.className = `map-row is-container${open ? " is-open" : ""}${store.selection === c.id ? " is-selected" : ""}${store.focus === c.id ? " is-focus" : ""}`;
+    head.dataset.testid = `map-${c.id}`;
+    head.innerHTML = `<span class="dot" data-lang="${langOf(c.technology, c.language)}"></span><span class="name">${esc(c.name)}</span><span class="meta">${esc(KIND_LABEL[c.kind] ?? c.kind)}</span>`;
     head.addEventListener("click", () => {
-      if (openDistricts.has(d.sub_build)) openDistricts.delete(d.sub_build); else openDistricts.add(d.sub_build);
-      actions.focusDistrict(di);
-      renderSubBuilds();
+      if (open && store.focus === c.id) { openContainers.delete(c.id); }
+      else openContainers.add(c.id);
+      jumpTo(c.id);
+      renderMap();
     });
     frag.appendChild(head);
-    if (!open) return;
-    for (const [x, i] of buildings) {
+    if (!open) continue;
+    for (const k of c.components) {
       const r = document.createElement("button");
-      r.className = `row is-nested${i === selB ? " is-selected" : ""}${x.step >= store.step ? " is-dim" : ""}`;
-      r.dataset.testid = `building-${x.id}`;
-      r.title = `${x.path}\nAdded in step ${x.step + 1}`;
-      r.innerHTML = `<span class="dot" data-lang="${x.lang}"></span><span class="name">${esc(x.name)}</span>${x.lamp ? `<span class="lamp-dot" title="Starts a trace across a boundary"></span>` : ""}<span class="meta">step ${x.step + 1}</span>`;
+      r.className = `map-row is-component${store.selection === k.id ? " is-selected" : ""}${store.focus === k.id ? " is-focus" : ""}`;
+      r.dataset.testid = `map-${k.id}`;
+      r.title = k.files.join("\n");
+      r.innerHTML = `<span class="name">${esc(k.name)}</span><span class="meta">${k.files.length} ${k.files.length === 1 ? "file" : "files"}</span>`;
+      r.addEventListener("click", () => jumpTo(k.id));
+      frag.appendChild(r);
+    }
+  }
+  if (a.people.length || a.externals.length) {
+    const t = document.createElement("div");
+    t.className = "group-title";
+    t.textContent = "Around the system";
+    frag.appendChild(t);
+    for (const p of a.people) {
+      const r = document.createElement("button");
+      r.className = `map-row is-person${store.selection === p.id ? " is-selected" : ""}`;
+      r.dataset.testid = `map-${p.id}`;
+      r.innerHTML = `<span class="glyph">☺</span><span class="name">${esc(p.name)}</span><span class="meta">person</span>`;
+      r.addEventListener("click", () => jumpTo(p.id));
+      frag.appendChild(r);
+    }
+    for (const x of a.externals) {
+      const r = document.createElement("button");
+      r.className = `map-row is-external${store.selection === x.id ? " is-selected" : ""}`;
+      r.dataset.testid = `map-${x.id}`;
+      r.innerHTML = `<span class="glyph">◌</span><span class="name">${esc(x.name)}</span><span class="meta">${esc(EXTERNAL_LABEL[x.kind] ?? x.kind).toLowerCase()}</span>`;
       r.addEventListener("click", () => jumpTo(x.id));
       frag.appendChild(r);
     }
-  });
+  }
   el.appendChild(frag);
 }
 
-function renderLegend(): void {
-  const el = $("#shelf .legend");
+export function playJourney(j: Journey, step = 0): void {
+  setJourney(j, step);
+  if (store.level === "code") setLevel("containers");
+  select(null);
+  setShelfTab("journeys");
+}
+
+function renderJourneys(): void {
+  const el = $("[data-tab-panel=journeys]");
+  const a = store.atlas;
   el.innerHTML = "";
-  const b = store.build;
-  if (!b) return;
-  const counts = new Map<Lang, number>();
-  for (const x of b.model.buildings) counts.set(x.lang, (counts.get(x.lang) ?? 0) + 1);
-  for (const [lang, n] of [...counts.entries()].sort((a, c) => c[1] - a[1])) {
-    const s = document.createElement("span");
-    s.className = "legend-item";
-    s.dataset.testid = `lang-${lang}`;
-    s.innerHTML = `<span class="brick-swatch" data-lang="${lang}"></span>${LANG_LABEL[lang]} <span class="meta">${n}</span>`;
-    el.appendChild(s);
-  }
-  const sep = document.createElement("span");
-  sep.className = "sep";
-  el.appendChild(sep);
-  const key = document.createElement("span");
-  key.className = "legend-item";
-  key.innerHTML = `<span class="edge-swatch" data-edge="flow"></span>bridge: data crosses languages`;
-  el.appendChild(key);
-  const lamp = document.createElement("span");
-  lamp.className = "legend-item";
-  lamp.innerHTML = `<span class="lamp-dot"></span>lamp: starts a trace`;
-  el.appendChild(lamp);
-  if (store.trace && store.traceOnModel) {
-    const t = document.createElement("button");
-    t.dataset.testid = "clear-trace";
-    t.title = "Stop highlighting this trace";
-    t.innerHTML = `<span class="chip is-boundary">trace ${esc(store.trace.name)} ×</span>`;
-    t.addEventListener("click", () => { store.traceOnModel = false; emit("trace"); });
-    el.appendChild(t);
+  if (!a) return;
+  if (!a.journeys.length) { el.innerHTML = `<p class="empty-note">No journey crosses a boundary yet. Journeys follow a call from an entry point across every language it touches.</p>`; return; }
+  for (const j of a.journeys) {
+    const b = document.createElement("button");
+    b.className = `journey-row${store.journey?.id === j.id ? " is-selected" : ""}`;
+    b.dataset.testid = `journey-${j.id}`;
+    const langs = [...new Set(j.steps.flatMap((s) => [s.from, s.to]).map((id) => containerOf(id)).filter(Boolean).map((c) => langOf(c!.technology, c!.language)))];
+    b.innerHTML = `<span class="jr-top"><span class="name">${esc(j.name)}</span><span class="meta">${j.steps.length} steps</span></span><span class="jr-summary">${esc(j.summary)}</span><span class="jr-langs">${langs.map((l) => `<span class="dot" data-lang="${l}"></span>`).join("")}<span class="jr-entry">${esc(j.entry)}</span></span>`;
+    b.addEventListener("click", () => { if (store.journey?.id === j.id) setJourney(null); else playJourney(j); });
+    el.appendChild(b);
   }
 }
 
-// ---- specimen card ----------------------------------------------------------
+function renderGuide(): void {
+  const el = $("[data-tab-panel=guide]");
+  const a = store.atlas;
+  el.innerHTML = "";
+  if (!a) return;
+  const g = a.guide;
+  el.innerHTML = `
+    <p class="guide-summary" data-testid="guide-summary">${prose(a.system.summary)}</p>
+    ${g.start_here.length ? `<div class="group-title">Start here</div>${g.start_here.map((p) => `<button class="guide-row" data-el="${esc(p.element)}"><span class="name">${esc(elementName(p.element))}</span><span class="why">${esc(p.why)}</span></button>`).join("")}` : ""}
+    ${g.callouts.length ? `<div class="group-title">Worth knowing</div>${g.callouts.map((c) => `<button class="guide-row is-callout" ${c.element ? `data-el="${esc(c.element)}"` : "disabled"}><span class="name">${esc(c.title)}</span><span class="why">${esc(c.detail)}</span></button>`).join("")}` : ""}
+    ${a.report.notes?.length ? `<div class="group-title">What the engine fixed</div><ul class="notes-list">${a.report.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`;
+  el.querySelectorAll<HTMLButtonElement>("[data-el]").forEach((b) => b.addEventListener("click", () => jumpTo(b.dataset.el!)));
+}
 
-async function renderCard(): Promise<void> {
+// ---- the card ---------------------------------------------------------------------
+
+function renderCard(): void {
   const card = $("#card");
   const id = store.selection;
-  if (id === null || store.tab === "manual" || store.tab === "design" || store.tab === "parts") { card.hidden = true; card.innerHTML = ""; document.body.classList.remove("has-card"); return; }
-  let d: NodeDetail;
-  try { d = await api.getNode(id); } catch (e) { log("warn", `node detail failed: ${String(e)}`); return; }
-  if (store.selection !== id) return;
-  const n = d.node;
-  const tags = n.tags ?? [];
-  const bi = buildingForNode(id);
-  const bld = buildingAt(bi);
-  const step = bld ? store.build!.design.steps[bld.step] : null;
-  const kindLine = n.kind === "symbol" ? `${n.symbol_kind ?? "symbol"} in ${d.file ?? ""}` : n.kind === "file" ? `file in ${d.package ?? ""}` : "package";
-  const ins = d.neighbours.filter((x) => x.direction === "in" && x.kind !== "package");
-  const outs = d.neighbours.filter((x) => x.direction === "out" && x.kind !== "package");
-  const nb = (list: typeof ins, title: string) => list.length ? `<div class="card-section"><h3>${title} (${list.length})</h3>${list.slice(0, 40).map((x) => `<button class="nb${x.edge === "flow" ? " is-flow" : ""}" data-jump="${x.id}" data-testid="nb-${x.id}"><span class="arrow">${x.direction === "in" ? "←" : "→"}</span><span class="nb-name" title="${esc(x.path)}">${esc(x.kind === "symbol" ? x.name : short(x.path))}</span><span class="nb-label">${esc(x.edge === "calls" ? "calls" : x.edge === "imports" ? "imports" : x.label ?? "flow")}</span></button>`).join("")}${list.length > 40 ? `<div class="group-title">and ${list.length - 40} more</div>` : ""}</div>` : "";
-  card.innerHTML = `
-    <button class="card-close" data-testid="card-close" title="Close (Esc)">×</button>
-    <div class="card-kind"><span class="dot" data-lang="${n.lang}"></span>${esc(LANG_LABEL[n.lang])} · ${esc(kindLine)}</div>
-    <h2 data-testid="card-title">${esc(n.name)}</h2>
-    <div class="card-path" data-testid="card-path">${esc(n.path)}${n.span ? `:${n.span[0]}` : ""}</div>
-    ${bld && step ? `<button class="card-step" data-testid="card-step" title="Show the manual at this step"><span class="step-no">${bld.step + 1}</span><span><b>${esc(step.title)}</b><br><span class="meta">${esc(store.build!.design.sub_builds.find((s) => s.id === step.sub_build)?.name ?? step.sub_build)}</span></span></button>` : ""}
-    ${tags.length ? `<div class="chips">${tags.filter((t) => t !== "external").map((t) => `<span class="chip${t.includes(":") || ["db", "fs", "queue", "http-server", "http-client", "ipc-server", "ipc-client"].includes(t) ? " is-boundary" : ""}">${esc(t)}</span>`).join("")}</div>` : ""}
-    <div class="card-actions">
-      <button class="ghost" data-testid="open-file">Open in editor</button>
-      ${n.kind !== "package" ? `<button class="ghost" data-testid="trace-from" title="Follow the calls from here across every boundary">Trace from here</button>` : ""}
-    </div>
-    <div class="card-facts">
-      <span>Lines</span><b>${n.loc.toLocaleString()}</b>
-      <span>Rests on</span><b>${outs.filter((x) => x.edge !== "flow").length}</b>
-      <span>Holds up</span><b>${ins.filter((x) => x.edge !== "flow").length}</b>
-      ${d.children.length ? `<span>Bricks</span><b>${d.children.length}</b>` : ""}
-    </div>
-    ${nb(outs.filter((x) => x.edge !== "flow"), "Rests on")}
-    ${nb(outs.filter((x) => x.edge === "flow"), "Bridges to")}
-    ${nb(ins.filter((x) => x.edge !== "flow"), "Holds up")}
-    ${nb(ins.filter((x) => x.edge === "flow"), "Bridged from")}
-  `;
+  const rk = store.relSelection;
+  if ((id === null && rk === null) || store.notesOpen) { card.hidden = true; card.innerHTML = ""; document.body.classList.remove("has-card"); return; }
+  card.innerHTML = rk ? relationshipCard(rk) : elementCard(id!);
   card.hidden = false;
   document.body.classList.add("has-card");
   card.querySelector("[data-testid=card-close]")!.addEventListener("click", () => select(null));
-  card.querySelector("[data-testid=open-file]")?.addEventListener("click", () => void api.openPath(n.path.split("#")[0], n.span?.[0]).catch((e) => toast(`Cannot open: ${String(e)}`, "error")));
-  card.querySelector("[data-testid=trace-from]")?.addEventListener("click", () => void traceFrom(n.id));
-  card.querySelector("[data-testid=card-step]")?.addEventListener("click", () => { if (bld) { setStep(bld.step + 1); setTab("manual"); } });
-  card.querySelectorAll<HTMLButtonElement>("[data-jump]").forEach((b) => b.addEventListener("click", () => jumpTo(Number(b.dataset.jump))));
+  card.querySelectorAll<HTMLButtonElement>("[data-jump]").forEach((b) => b.addEventListener("click", () => jumpTo(b.dataset.jump!)));
+  card.querySelectorAll<HTMLButtonElement>("[data-rel]").forEach((b) => b.addEventListener("click", () => selectRelationship(b.dataset.rel!)));
+  card.querySelectorAll<HTMLButtonElement>("[data-zoom]").forEach((b) => b.addEventListener("click", () => zoomInto(b.dataset.zoom!)));
+  card.querySelectorAll<HTMLButtonElement>("[data-open]").forEach((b) => b.addEventListener("click", () => void api.openPath(b.dataset.open!, b.dataset.line ? Number(b.dataset.line) : undefined).catch((e) => toast(`Cannot open: ${String(e)}`, "error"))));
+  card.querySelectorAll<HTMLButtonElement>("[data-journey]").forEach((b) => b.addEventListener("click", () => { const j = store.atlas!.journeys.find((x) => x.id === b.dataset.journey); if (j) playJourney(j, Number(b.dataset.step ?? 0)); }));
+}
+
+function relRows(rels: Relationship[], dir: "out" | "in", self: string): string {
+  if (!rels.length) return "";
+  return `<div class="card-section"><h3>${dir === "out" ? "Talks to" : "Used by"}</h3>${rels.map((r) => {
+    const other = dir === "out" ? r.to : r.from;
+    return `<button class="nb is-${r.source}" data-rel="${esc(relKey(r))}" data-testid="rel-${esc(relKey(r))}" title="${esc(r.label)}${r.technology ? ` (${esc(r.technology)})` : ""}"><span class="arrow">${dir === "out" ? "→" : "←"}</span><span class="nb-name">${esc(elementName(other))}</span><span class="nb-label">${esc(r.label)}</span></button>`;
+  }).join("")}</div>`.replace(self, self);
+}
+
+function sourceBadge(source: string): string {
+  return source === "code" ? `<span class="chip is-ok">backed by code</span>` : source === "survey" ? `<span class="chip">from the survey</span>` : `<span class="chip is-claimed">claimed, not seen in code</span>`;
+}
+
+function elementCard(id: string): string {
+  const e = elementById(id);
+  const a = store.atlas!;
+  if (!e) return `<button class="card-close" data-testid="card-close">×</button><p>Nothing selected.</p>`;
+  const close = `<button class="card-close" data-testid="card-close" title="Close (Esc)">×</button>`;
+  const rels = relationshipsOf(id);
+  const outs = rels.filter((r) => r.from === id);
+  const ins = rels.filter((r) => r.to === id);
+  const journeys = a.journeys.filter((j) => j.steps.some((s) => s.from === id || s.to === id || containerOf(s.from)?.id === id || containerOf(s.to)?.id === id));
+  const jrows = journeys.length ? `<div class="card-section"><h3>Journeys through here</h3>${journeys.map((j) => `<button class="nb" data-journey="${esc(j.id)}"><span class="arrow">▶</span><span class="nb-name">${esc(j.name)}</span><span class="nb-label">${j.steps.length} steps</span></button>`).join("")}</div>` : "";
+  switch (e.kind) {
+    case "system":
+      return `${close}
+        <div class="card-kind">Software system</div>
+        <h2 data-testid="card-title">${esc(a.system.name)}</h2>
+        <p class="card-lede">${esc(a.system.purpose)}</p>
+        <p class="card-body">${prose(a.system.summary)}</p>
+        <div class="card-actions"><button class="primary" data-zoom="s" data-testid="card-zoom">Open the containers</button></div>
+        ${a.guide.start_here.length ? `<div class="card-section"><h3>Start here</h3>${a.guide.start_here.map((p) => `<button class="nb" data-jump="${esc(p.element)}"><span class="arrow">→</span><span class="nb-name">${esc(elementName(p.element))}</span></button><p class="nb-why">${esc(p.why)}</p>`).join("")}</div>` : ""}
+        ${a.guide.callouts.length ? `<div class="card-section"><h3>Worth knowing</h3>${a.guide.callouts.map((c) => `<p class="callout"><b>${esc(c.title)}</b><br>${esc(c.detail)}</p>`).join("")}</div>` : ""}`;
+    case "person":
+      return `${close}
+        <div class="card-kind">Person</div>
+        <h2 data-testid="card-title">${esc(e.person.name)}</h2>
+        <p class="card-body">${prose(e.person.description)}</p>
+        ${relRows(outs, "out", id)}${jrows}`;
+    case "external":
+      return `${close}
+        <div class="card-kind">${esc(EXTERNAL_LABEL[e.external.kind] ?? "Outside system")}</div>
+        <h2 data-testid="card-title">${esc(e.external.name)}</h2>
+        <p class="card-body">${prose(e.external.description)}</p>
+        ${relRows(ins, "in", id)}${relRows(outs, "out", id)}${jrows}`;
+    case "container": {
+      const c = e.container;
+      const d = store.discovery.agents.find((x) => x.target === c.id);
+      return `${close}
+        <div class="card-kind"><span class="dot" data-lang="${langOf(c.technology, c.language)}"></span>${esc(KIND_LABEL[c.kind] ?? "Container")} · ${esc(c.technology)}</div>
+        <h2 data-testid="card-title">${esc(c.name)}</h2>
+        <div class="card-path" data-testid="card-path">${esc(c.package)}</div>
+        <p class="card-body">${prose(c.description)}</p>
+        ${c.responsibilities?.length ? `<ul class="resp">${c.responsibilities.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
+        ${d && !d.done ? `<p class="meta"><span class="lamp-dot"></span> An agent is reading this container${d.current ? `: ${esc(d.current)}` : ""}.</p>` : ""}
+        <div class="card-actions"><button class="primary" data-zoom="${esc(c.id)}" data-testid="card-zoom">Open its ${c.components.length} components</button></div>
+        <div class="card-section"><h3>Components</h3>${c.components.map((k) => `<button class="nb" data-jump="${esc(k.id)}" data-testid="nb-${esc(k.id)}"><span class="arrow">▸</span><span class="nb-name">${esc(k.name)}</span><span class="nb-label">${k.files.length} ${k.files.length === 1 ? "file" : "files"}</span></button>`).join("")}</div>
+        ${relRows(outs, "out", id)}${relRows(ins, "in", id)}${jrows}`;
+    }
+    case "component": {
+      const { container: c, component: k } = e;
+      return `${close}
+        <div class="card-kind"><span class="dot" data-lang="${langOf(k.technology || c.technology, c.language)}"></span>component in <button class="link-quiet" data-jump="${esc(c.id)}">${esc(c.name)}</button></div>
+        <h2 data-testid="card-title">${esc(k.name)}</h2>
+        ${k.technology ? `<div class="card-path">${esc(k.technology)}</div>` : ""}
+        <p class="card-body">${prose(k.description)}</p>
+        ${k.responsibilities?.length ? `<ul class="resp">${k.responsibilities.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
+        <div class="card-actions"><button class="primary" data-zoom="${esc(k.id)}" data-testid="card-zoom">Read the code</button></div>
+        <div class="card-section"><h3>Files</h3>${k.files.map((f) => `<button class="nb is-file" data-open="${esc(f)}" title="Open in editor"><span class="arrow">·</span><span class="nb-name mono">${esc(f)}</span></button>`).join("")}</div>
+        ${relRows(outs, "out", id)}${relRows(ins, "in", id)}${jrows}`;
+    }
+  }
+}
+
+function relationshipCard(key: string): string {
+  const a = store.atlas!;
+  const [from, to] = key.split(">");
+  // Several relationships can share a drawn edge (context level rolls them up).
+  const rels = a.relationships.filter((r) => relKey(r) === key);
+  const close = `<button class="card-close" data-testid="card-close" title="Close (Esc)">×</button>`;
+  if (!rels.length) {
+    const rolled = a.relationships.filter((r) => (from === "s" ? containerOf(r.from) !== null : r.from === from) && (to === "s" ? containerOf(r.to) !== null : r.to === to));
+    if (!rolled.length) return `${close}<p>No relationship ${esc(from)} → ${esc(to)}.</p>`;
+    return `${close}
+      <div class="card-kind">Relationship</div>
+      <h2 data-testid="card-title">${esc(elementName(from))} → ${esc(elementName(to))}</h2>
+      <div class="card-section"><h3>Made of</h3>${rolled.map((r) => `<button class="nb is-${r.source}" data-rel="${esc(relKey(r))}"><span class="arrow">→</span><span class="nb-name">${esc(elementName(r.from))} → ${esc(elementName(r.to))}</span><span class="nb-label">${esc(r.label)}</span></button>`).join("")}</div>`;
+  }
+  const r = rels[0];
+  const ev = r.evidence ?? [];
+  const journeys = a.journeys.map((j) => ({ j, i: j.steps.findIndex((s) => s.from === r.from && s.to === r.to || (containerOf(s.from)?.id === r.from && containerOf(s.to)?.id === r.to)) })).filter((x) => x.i >= 0);
+  return `${close}
+    <div class="card-kind">Relationship · ${esc(r.level)} level</div>
+    <h2 data-testid="card-title"><button class="link-quiet" data-jump="${esc(r.from)}">${esc(elementName(r.from))}</button> → <button class="link-quiet" data-jump="${esc(r.to)}">${esc(elementName(r.to))}</button></h2>
+    <p class="card-lede">${esc(r.label)}${r.technology ? ` <span class="meta">over ${esc(r.technology)}</span>` : ""}</p>
+    <div class="chips">${sourceBadge(r.source)}</div>
+    ${r.source === "claimed" ? `<p class="callout is-claimed">An agent wrote this relationship, but the engine found no import, call or flow between these two in the code. Treat it as a hint, not a fact.</p>` : ""}
+    ${r.source === "survey" ? `<p class="meta">People and outside systems are declared by the survey; the code cannot show who sits at the keyboard.</p>` : ""}
+    ${ev.length ? `<div class="card-section"><h3>Evidence in the code (${ev.length})</h3>${ev.map((x) => `<button class="nb is-evidence" data-open="${esc(x.from.split("#")[0])}" ${x.line ? `data-line="${x.line}"` : ""} title="Open in editor"><span class="arrow">${x.via === "flow" ? "⇢" : x.via === "tag" ? "◌" : "→"}</span><span class="nb-name mono">${esc(x.from)}${x.line ? `:${x.line}` : ""}</span><span class="nb-label">${esc(x.via === "tag" ? (x.label ?? "tag") : x.via === "flow" ? (x.label ?? "flow") : x.via)}</span></button><div class="ev-to mono">${esc(x.via === "tag" ? "" : x.to)}</div>`).join("")}</div>` : ""}
+    ${journeys.length ? `<div class="card-section"><h3>On these journeys</h3>${journeys.map(({ j, i }) => `<button class="nb" data-journey="${esc(j.id)}" data-step="${i + 1}"><span class="arrow">▶</span><span class="nb-name">${esc(j.name)}</span><span class="nb-label">step ${i + 1}</span></button>`).join("")}</div>` : ""}`;
+}
+
+// ---- journey bar ----------------------------------------------------------------
+
+function initJourneyBar(): void {
+  $("#jb-prev").addEventListener("click", () => setJourneyStep(store.journeyStep - 1));
+  $("#jb-next").addEventListener("click", () => setJourneyStep(store.journeyStep + 1));
+  $("#jb-close").addEventListener("click", () => setJourney(null));
+  $("#jb-all").addEventListener("click", () => setJourneyStep(0));
+}
+
+function renderJourneyBar(): void {
+  const bar = $("#journey-bar");
+  const j = store.journey;
+  bar.hidden = !j;
+  document.body.classList.toggle("has-journey", !!j);
+  if (!j) return;
+  const n = store.journeyStep;
+  const step = n > 0 ? j.steps[n - 1] : null;
+  $("#jb-title").textContent = j.name;
+  $("#jb-count").textContent = n > 0 ? `Step ${n} of ${j.steps.length}` : `${j.steps.length} steps, all shown`;
+  $("#jb-caption").innerHTML = step ? `<span class="jb-from">${esc(elementName(step.from))}</span><span class="jb-arrow">→</span><span class="jb-to">${esc(elementName(step.to))}</span><span class="jb-text">${esc(step.caption)}</span>` : `<span class="jb-text">${esc(j.summary)}</span>`;
+  $<HTMLButtonElement>("#jb-prev").disabled = n <= 0;
+  $<HTMLButtonElement>("#jb-next").disabled = n >= j.steps.length;
+  const range = $<HTMLInputElement>("#jb-range");
+  range.max = String(j.steps.length);
+  range.value = String(n);
+  range.style.setProperty("--fill", `${(n / Math.max(1, j.steps.length)) * 100}%`);
+  range.oninput = () => setJourneyStep(Number(range.value));
 }
 
 // ---- overlays -----------------------------------------------------------------
@@ -336,13 +475,7 @@ export function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
-/** Escape, then render `inline code` the way the design agents write it. */
+/** Escape, then render `inline code` the way the agents write it. */
 export function prose(s: string): string {
   return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
-}
-
-export function short(path: string): string {
-  const [file, sym] = path.split("#");
-  const base = file.split("/").pop() ?? file;
-  return sym ? `${base}#${sym}` : base;
 }

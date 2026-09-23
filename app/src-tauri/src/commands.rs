@@ -1,14 +1,14 @@
 //! Tauri commands: the frontend's view of the backend. The agent bridge reuses these.
 
-use crate::state::{AppState, FrameMetrics, UiReport};
+use crate::state::{AppState, FrameMetrics, Loaded, UiReport};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
-use terrarium_core::build::{self, Build};
-use terrarium_core::{Graph, NodeId, NodeKind, ScanOptions, cache, designer, query};
+use terrarium_core::atlas::{self, Atlas};
+use terrarium_core::{Graph, NodeId, NodeKind, ScanOptions, cache, discovery, query};
 
 type Res<T> = Result<T, String>;
 
@@ -22,6 +22,14 @@ pub struct ScanDone {
     pub stats: terrarium_core::Stats,
     pub cached: String,
     pub from_cache: bool,
+}
+
+/// The atlas as the frontend receives it.
+#[derive(Serialize)]
+pub struct AtlasView<'a> {
+    pub atlas: &'a Atlas,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: &'a Option<String>,
 }
 
 /// Scan (or load from cache when `fresh` is false and a cache exists), install as the current graph.
@@ -49,13 +57,13 @@ pub fn do_scan(app: &AppHandle, path: &str, fresh: bool) -> anyhow::Result<ScanD
             cached: cached.to_string_lossy().to_string(),
             from_cache,
         };
-        let b = {
-            let _s = tracing::info_span!("assemble_build").entered();
-            build::for_graph(&graph, cache::load_design(root))
+        let (a, stale) = {
+            let _s = tracing::info_span!("assemble_atlas").entered();
+            atlas::for_graph(&graph, cache::load_atlas(root))
         };
-        tracing::info!(source = %b.design.source, steps = b.check.steps, pieces = b.check.pieces, weak = b.check.weak.len(), repairs = b.check.repairs.len(), "build assembled");
+        tracing::info!(source = %a.source, containers = a.containers.len(), relationships = a.relationships.len(), backed = a.report.backed, claimed = a.report.claimed, "atlas assembled");
         *state.graph.write().unwrap() = Some(Arc::new(graph));
-        *state.build.write().unwrap() = Some(Arc::new(b));
+        *state.atlas.write().unwrap() = Some(Arc::new(Loaded { atlas: a, stale }));
         Ok::<_, anyhow::Error>(done)
     })();
     state.scanning.store(false, Ordering::SeqCst);
@@ -89,74 +97,90 @@ pub async fn scan_repo(
         .map_err(err)
 }
 
-#[tauri::command]
-pub fn get_build(state: State<'_, Arc<AppState>>) -> Res<Arc<Build>> {
-    state.count(&state.counters.ipc_calls);
-    state.build().ok_or_else(|| "no repository loaded".into())
+pub fn atlas_value(state: &AppState) -> Res<Value> {
+    let l = state.atlas().ok_or_else(|| "no repository loaded".to_string())?;
+    serde_json::to_value(AtlasView { atlas: &l.atlas, stale: &l.stale }).map_err(err)
 }
 
-/// Have Claude design the manual: one agent per sub-build plus an assembler.
-/// Progress arrives as `design:progress` events; the result is saved next to the
-/// graph and becomes the current build.
-pub fn do_design(app: &AppHandle, model: Option<String>) -> anyhow::Result<Value> {
+#[tauri::command]
+pub fn get_atlas(state: State<'_, Arc<AppState>>) -> Res<Value> {
+    state.count(&state.counters.ipc_calls);
+    atlas_value(&state)
+}
+
+#[tauri::command]
+pub fn atlas_dsl(state: State<'_, Arc<AppState>>) -> Res<String> {
+    let l = state.atlas().ok_or("no repository loaded")?;
+    Ok(atlas::to_dsl(&l.atlas))
+}
+
+/// Have Claude discover the atlas: a surveyor, one agent per container and per
+/// journey, and an editor. Progress arrives as `discover:progress` events, with
+/// partial results the UI draws as they land; the checked atlas is saved next to
+/// the graph and becomes the current one.
+pub fn do_discover(app: &AppHandle, model: Option<String>) -> anyhow::Result<Value> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let graph = state.graph().ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
-    if state.designing.swap(true, Ordering::SeqCst) {
-        anyhow::bail!("a design is already running");
+    if state.discovering.swap(true, Ordering::SeqCst) {
+        anyhow::bail!("a discovery is already running");
     }
-    let _ = app.emit("design:started", json!({}));
+    let _ = app.emit("discover:started", json!({}));
     let result = (|| {
-        let _span = tracing::info_span!("design_with_claude").entered();
-        let mut opts = designer::Options::default();
+        let _span = tracing::info_span!("discover_with_claude").entered();
+        let mut opts = discovery::Options::default();
         if let Some(m) = model {
             opts.model = m;
         }
         let root = Path::new(&graph.root);
-        let runner = designer::claude_runner(root, &opts);
-        let progress = |p: designer::Progress| {
-            tracing::info!(progress = %serde_json::to_string(&p).unwrap_or_default(), "design progress");
-            let _ = app.emit("design:progress", &p);
+        let runner = discovery::claude_runner(root, &opts);
+        let progress = |p: discovery::Progress| {
+            match &p {
+                discovery::Progress::AgentActivity { .. } => tracing::debug!(progress = %serde_json::to_string(&p).unwrap_or_default(), "discovery activity"),
+                discovery::Progress::Verified { .. } => tracing::info!(progress = "verified", "discovery progress"),
+                _ => tracing::info!(progress = %serde_json::to_string(&p).unwrap_or_default(), "discovery progress"),
+            }
+            let _ = app.emit("discover:progress", &p);
         };
-        let (design, run) = designer::design(&graph, &opts, &runner, &progress)?;
-        cache::store_design(root, &design)?;
-        let b = build::for_graph(&graph, Some(design));
-        tracing::info!(model = %run.model, cost_usd = run.cost_usd, secs = run.secs, steps = b.check.steps, weak = b.check.weak.len(), "design done");
-        *state.build.write().unwrap() = Some(Arc::new(b));
-        state.count(&state.counters.designs);
+        let (a, run) = discovery::discover(&graph, &opts, &runner, &progress)?;
+        cache::store_atlas(root, &a)?;
+        tracing::info!(model = %run.model, cost_usd = run.cost_usd, secs = run.secs, containers = a.containers.len(), backed = a.report.backed, claimed = a.report.claimed, "discovery done");
+        *state.atlas.write().unwrap() = Some(Arc::new(Loaded { atlas: a, stale: None }));
+        state.count(&state.counters.discoveries);
         Ok::<_, anyhow::Error>(serde_json::to_value(&run)?)
     })();
-    state.designing.store(false, Ordering::SeqCst);
+    state.discovering.store(false, Ordering::SeqCst);
     match &result {
         Ok(run) => {
-            let _ = app.emit("design:done", run);
+            let _ = app.emit("discover:done", run);
         }
         Err(e) => {
-            tracing::warn!(error = %e, "design failed");
-            let _ = app.emit("design:error", json!({ "error": e.to_string() }));
+            tracing::warn!(error = %e, "discovery failed");
+            let _ = app.emit("discover:error", json!({ "error": e.to_string() }));
         }
     }
     result
 }
 
 #[tauri::command]
-pub async fn design_with_claude(app: AppHandle, state: State<'_, Arc<AppState>>, model: Option<String>) -> Res<Value> {
+pub async fn discover_with_claude(app: AppHandle, state: State<'_, Arc<AppState>>, model: Option<String>) -> Res<Value> {
     state.count(&state.counters.ipc_calls);
     let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || do_design(&app2, model)).await.map_err(err)?.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || do_discover(&app2, model)).await.map_err(err)?.map_err(err)
 }
 
-/// Forget Claude's design and go back to the engine's.
-pub fn do_reset_design(state: &AppState) -> anyhow::Result<Arc<Build>> {
+/// Forget Claude's atlas and go back to the engine's.
+pub fn do_reset_atlas(state: &AppState) -> anyhow::Result<()> {
     let graph = state.graph().ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
-    cache::clear_design(Path::new(&graph.root))?;
-    let b = Arc::new(build::for_graph(&graph, None));
-    *state.build.write().unwrap() = Some(b.clone());
-    Ok(b)
+    cache::clear_atlas(Path::new(&graph.root))?;
+    let a = atlas::engine_atlas(&graph);
+    *state.atlas.write().unwrap() = Some(Arc::new(Loaded { atlas: a, stale: None }));
+    Ok(())
 }
 
 #[tauri::command]
-pub fn reset_design(state: State<'_, Arc<AppState>>) -> Res<Arc<Build>> {
-    do_reset_design(&state).map_err(err)
+pub fn reset_atlas(state: State<'_, Arc<AppState>>) -> Res<Value> {
+    do_reset_atlas(&state).map_err(err)?;
+    atlas_value(&state)
 }
 
 #[derive(Serialize)]
@@ -172,7 +196,7 @@ pub fn node_detail(graph: &Graph, id: NodeId) -> anyhow::Result<NodeDetail> {
     anyhow::ensure!((id as usize) < graph.nodes.len(), "no node {id}");
     let node = graph.node(id).clone();
     let neighbours = query::neighbours(graph, id);
-    let children = graph.children(id).take(200).map(|c| json!({ "id": c.id, "name": c.name, "kind": c.kind, "lang": c.lang, "loc": c.loc, "tags": c.tags })).collect();
+    let children = graph.children(id).take(200).map(|c| json!({ "id": c.id, "name": c.name, "kind": c.kind, "lang": c.lang, "loc": c.loc, "tags": c.tags, "symbol_kind": c.symbol_kind, "span": c.span })).collect();
     let package = graph
         .ancestor_of_kind(id, NodeKind::Package)
         .map(|p| graph.node(p).name.clone());
@@ -192,6 +216,15 @@ pub fn node_detail(graph: &Graph, id: NodeId) -> anyhow::Result<NodeDetail> {
 pub fn get_node(state: State<'_, Arc<AppState>>, id: NodeId) -> Res<NodeDetail> {
     state.count(&state.counters.ipc_calls);
     let g = state.graph().ok_or("no repository loaded")?;
+    node_detail(&g, id).map_err(err)
+}
+
+/// Node detail by path, for the code level of the atlas.
+#[tauri::command]
+pub fn get_file(state: State<'_, Arc<AppState>>, path: String) -> Res<NodeDetail> {
+    state.count(&state.counters.ipc_calls);
+    let g = state.graph().ok_or("no repository loaded")?;
+    let id = resolve_node(&g, &path).map_err(err)?;
     node_detail(&g, id).map_err(err)
 }
 
@@ -233,35 +266,16 @@ pub fn list_flows(state: State<'_, Arc<AppState>>) -> Res<Vec<query::FlowRow>> {
 }
 
 #[tauri::command]
-pub fn list_traces(state: State<'_, Arc<AppState>>) -> Res<Vec<query::Trace>> {
+pub fn get_trace(state: State<'_, Arc<AppState>>, entry: String) -> Res<query::Trace> {
     let g = state.graph().ok_or("no repository loaded")?;
-    let mut t = query::traces(&g);
-    t.truncate(500);
-    Ok(t)
-}
-
-#[tauri::command]
-pub fn get_trace(state: State<'_, Arc<AppState>>, entry: NodeId) -> Res<query::Trace> {
-    let g = state.graph().ok_or("no repository loaded")?;
-    if entry as usize >= g.nodes.len() {
-        return Err(format!("no node with id {entry}"));
-    }
-    query::trace_from(&g, entry).ok_or_else(|| format!("{} crosses no boundary", g.node(entry).path))
+    let id = resolve_node(&g, &entry).map_err(err)?;
+    query::trace_from(&g, id).ok_or_else(|| format!("{} crosses no boundary", g.node(id).path))
 }
 
 #[tauri::command]
 pub fn list_endpoints(state: State<'_, Arc<AppState>>) -> Res<Vec<query::Endpoint>> {
     let g = state.graph().ok_or("no repository loaded")?;
     Ok(query::endpoints(&g))
-}
-
-#[tauri::command]
-pub fn list_boundaries(
-    state: State<'_, Arc<AppState>>,
-    tag: Option<String>,
-) -> Res<Vec<query::Boundary>> {
-    let g = state.graph().ok_or("no repository loaded")?;
-    Ok(query::boundaries(&g, tag.as_deref()))
 }
 
 #[tauri::command]

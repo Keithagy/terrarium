@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use terrarium_core::Graph;
-use terrarium_core::build::Build;
+use terrarium_core::atlas::Atlas;
 use tokio::sync::oneshot;
 
-/// What the frontend last told us about itself (tab, step, selection, panels…).
+/// What the frontend last told us about itself (level, focus, selection, panels…).
 /// Refreshed every ~500ms and on change; kept as JSON so the UI can grow fields freely.
 pub type UiReport = Value;
 
@@ -20,9 +20,8 @@ pub struct FrameMetrics {
     pub fps: f64,
     pub frame_ms_p50: f64,
     pub frame_ms_p95: f64,
-    pub draw_calls: u32,
     #[serde(default)]
-    pub pieces_drawn: u32,
+    pub elements_drawn: u32,
     pub renderer: String,
     pub ts: String,
 }
@@ -32,20 +31,27 @@ pub struct Counters {
     pub ipc_calls: AtomicU64,
     pub bridge_requests: AtomicU64,
     pub scans: AtomicU64,
-    pub designs: AtomicU64,
+    pub discoveries: AtomicU64,
     pub frontend_errors: AtomicU64,
+}
+
+/// The atlas on show, and why it may not match the scan exactly.
+pub struct Loaded {
+    pub atlas: Atlas,
+    /// Set when a saved agent atlas was made for an older scan and was re-checked against this one.
+    pub stale: Option<String>,
 }
 
 pub struct AppState {
     pub started: Instant,
     pub telemetry: Arc<Telemetry>,
     pub graph: RwLock<Option<Arc<Graph>>>,
-    /// The brick model of the current graph, rebuilt after every scan and design.
-    pub build: RwLock<Option<Arc<Build>>>,
+    /// The atlas of the current graph, rebuilt after every scan and discovery.
+    pub atlas: RwLock<Option<Arc<Loaded>>>,
     pub ui: RwLock<UiReport>,
     pub metrics: RwLock<FrameMetrics>,
     pub scanning: AtomicBool,
-    pub designing: AtomicBool,
+    pub discovering: AtomicBool,
     pub counters: Counters,
     pub pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     pub next_request: AtomicU64,
@@ -59,11 +65,11 @@ impl AppState {
             started: Instant::now(),
             telemetry,
             graph: RwLock::new(None),
-            build: RwLock::new(None),
+            atlas: RwLock::new(None),
             ui: RwLock::new(Value::Null),
             metrics: RwLock::new(FrameMetrics::default()),
             scanning: AtomicBool::new(false),
-            designing: AtomicBool::new(false),
+            discovering: AtomicBool::new(false),
             counters: Counters::default(),
             pending: Mutex::new(HashMap::new()),
             next_request: AtomicU64::new(1),
@@ -77,8 +83,8 @@ impl AppState {
         self.graph.read().unwrap().clone()
     }
 
-    pub fn build(&self) -> Option<Arc<Build>> {
-        self.build.read().unwrap().clone()
+    pub fn atlas(&self) -> Option<Arc<Loaded>> {
+        self.atlas.read().unwrap().clone()
     }
 
     pub fn uptime_s(&self) -> f64 {

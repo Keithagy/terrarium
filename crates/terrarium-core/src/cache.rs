@@ -112,25 +112,25 @@ pub fn find_entry(root: &Path) -> Option<CacheEntry> {
     None
 }
 
-/// The saved design for `root`: `<key>.design.json` next to its graph.
-pub fn design_file(root: &Path) -> PathBuf {
-    graphs_dir().join(format!("{}.design.json", key_for(root)))
+/// The saved atlas for `root`: `<key>.atlas.json` next to its graph.
+pub fn atlas_file(root: &Path) -> PathBuf {
+    graphs_dir().join(format!("{}.atlas.json", key_for(root)))
 }
 
-pub fn store_design(root: &Path, design: &crate::build::Design) -> Result<PathBuf> {
-    let file = design_file(root);
+pub fn store_atlas(root: &Path, atlas: &crate::atlas::Atlas) -> Result<PathBuf> {
+    let file = atlas_file(root);
     std::fs::create_dir_all(graphs_dir()).context("cannot create cache dir")?;
-    std::fs::write(&file, serde_json::to_vec_pretty(design)?)?;
+    std::fs::write(&file, serde_json::to_vec_pretty(atlas)?)?;
     Ok(file)
 }
 
-pub fn load_design(root: &Path) -> Option<crate::build::Design> {
-    std::fs::read(design_file(root)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+pub fn load_atlas(root: &Path) -> Option<crate::atlas::Atlas> {
+    std::fs::read(atlas_file(root)).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
 
-/// Forget the saved design, so the engine's is used again. False when there was none.
-pub fn clear_design(root: &Path) -> Result<bool> {
-    let file = design_file(root);
+/// Forget the saved atlas, so the engine's is used again. False when there was none.
+pub fn clear_atlas(root: &Path) -> Result<bool> {
+    let file = atlas_file(root);
     if !file.exists() {
         return Ok(false);
     }

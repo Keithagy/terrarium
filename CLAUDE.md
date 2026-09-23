@@ -9,3 +9,8 @@ Vite/TypeScript UI. macOS only.
 - Frontend logs must go through `log()` in `app/ui/src/tauri.ts` so they reach the bridge.
 - New UI controls need a `data-testid`; the bridge's `/ui` and `/ui/click` rely on them.
 - Language extraction changes need a case in `fixtures/polyglot` and `crates/terrarium-core/tests/polyglot.rs`.
+- Atlas changes (engine draft, check, export) need a case in `crates/terrarium-core/tests/atlas.rs`;
+  orchestration changes need one in `tests/discovery.rs` (stand-in runner, nothing spent).
+- Agent prompts and schemas live in `crates/terrarium-core/src/discovery.rs`; `scripts/stand-in-claude.py`
+  parses those prompts, so keep its role detection in step when the opening words change.
+- Never run a real discovery in tests or `verify.sh`; it spends money. Use the stand-in.

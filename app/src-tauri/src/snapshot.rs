@@ -1,5 +1,5 @@
 //! Native window screenshot via `WKWebView.takeSnapshot`, which captures the
-//! WebGL canvas and the DOM panels together and needs no screen-recording permission.
+//! diagram and the panels together and needs no screen-recording permission.
 
 use anyhow::{Context, anyhow};
 use std::sync::{Arc, Mutex};

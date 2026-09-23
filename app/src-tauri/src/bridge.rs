@@ -92,21 +92,21 @@ fn describe() -> Value {
         "auth": "header x-terrarium-token (see <terrarium home>/bridge.json)",
         "endpoints": [
             { "method": "GET",  "path": "/health",         "summary": "liveness, repo, counts, fps" },
-            { "method": "GET",  "path": "/state",          "summary": "full UI + backend state (tab, step, view, selection, panels, build summary)" },
+            { "method": "GET",  "path": "/state",          "summary": "full UI + backend state (level, focus, selection, journey, panels, atlas summary)" },
             { "method": "POST", "path": "/scan",           "summary": "{path, fresh?} scan or load from cache, then show it" },
-            { "method": "GET",  "path": "/build",          "summary": "the brick model: design, joint check and geometry" },
+            { "method": "GET",  "path": "/atlas",          "summary": "the atlas: system, people, externals, containers, components, relationships with evidence, journeys, guide, report" },
+            { "method": "GET",  "path": "/atlas/dsl",      "summary": "the atlas as Structurizr DSL (text/plain)" },
             { "method": "GET",  "path": "/graph/full",     "summary": "the raw graph (all nodes and edges)" },
-            { "method": "GET",  "path": "/node/{id}",      "summary": "node detail with neighbours" },
+            { "method": "GET",  "path": "/node/{id}",      "summary": "node detail with neighbours (id or path)" },
             { "method": "GET",  "path": "/search",         "summary": "?q=&limit= fuzzy node search" },
             { "method": "GET",  "path": "/flows",          "summary": "cross-language data flows" },
-            { "method": "POST", "path": "/select",         "summary": "{node} select by id or path" },
+            { "method": "POST", "path": "/select",         "summary": "{element} select an atlas element (container, component, person, external, or a file path) and show it" },
             { "method": "POST", "path": "/search",         "summary": "{q} type into the search box" },
-            { "method": "POST", "path": "/step",           "summary": "{step} scrub the build to a manual step (1-based; 0 = empty plate, omitted = finished)" },
-            { "method": "POST", "path": "/view",           "summary": "{view?: iso|front|top, spin?, fit?} camera on the model" },
-            { "method": "POST", "path": "/tab",            "summary": "{tab: model|manual|parts|traces|design}" },
-            { "method": "POST", "path": "/design",         "summary": "{model?} have Claude design the manual (one agent per sub-build); blocks until done" },
-            { "method": "POST", "path": "/design/reset",   "summary": "forget Claude's design and use the engine's" },
-            { "method": "POST", "path": "/reset",          "summary": "clear selection and highlights, finished model, fit" },
+            { "method": "POST", "path": "/level",          "summary": "{level: context|containers|components|code, focus?} go to a diagram level (focus: a container or component id)" },
+            { "method": "POST", "path": "/journey",        "summary": "{journey?, step?} play a journey (id or name); omit journey to stop; step is 1-based" },
+            { "method": "POST", "path": "/discover",       "summary": "{model?} have Claude discover the atlas (survey, one agent per container and journey, editor); blocks until done" },
+            { "method": "POST", "path": "/discover/reset", "summary": "forget Claude's atlas and use the engine's" },
+            { "method": "POST", "path": "/reset",          "summary": "context level, no selection, no journey, fit" },
             { "method": "GET",  "path": "/screenshot",     "summary": "PNG of the window (?format=json for a data URL)" },
             { "method": "GET",  "path": "/ui",             "summary": "semantic snapshot: panels, testids, texts, toasts" },
             { "method": "POST", "path": "/ui/click",       "summary": "{testid} click an element" },
@@ -164,17 +164,17 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/state", get(state))
         .route("/scan", post(scan))
         .route("/open", post(scan))
-        .route("/build", get(build))
+        .route("/atlas", get(atlas_get))
+        .route("/atlas/dsl", get(atlas_dsl))
         .route("/graph/full", get(graph_full))
         .route("/node/{id}", get(node))
         .route("/search", get(search_get).post(search_post))
         .route("/flows", get(flows))
         .route("/select", post(select))
-        .route("/step", post(step))
-        .route("/view", post(view))
-        .route("/tab", post(tab))
-        .route("/design", post(design))
-        .route("/design/reset", post(design_reset))
+        .route("/level", post(level))
+        .route("/journey", post(journey))
+        .route("/discover", post(discover))
+        .route("/discover/reset", post(discover_reset))
         .route("/reset", post(reset))
         .route("/screenshot", get(screenshot))
         .route("/ui", get(ui))
@@ -192,28 +192,33 @@ pub fn router(ctx: Ctx) -> Router {
 fn backend_state(ctx: &Ctx) -> Value {
     let s = &ctx.state;
     let graph = s.graph();
-    let build = s.build();
+    let loaded = s.atlas();
     json!({
         "repo": graph.as_ref().map(|g| g.root.clone()),
         "scanning": s.scanning.load(Ordering::Relaxed),
-        "designing": s.designing.load(Ordering::Relaxed),
+        "discovering": s.discovering.load(Ordering::Relaxed),
         "stats": graph.as_ref().map(|g| g.stats.clone()),
-        "build": build.as_ref().map(|b| json!({
-            "title": b.design.title,
-            "source": b.design.source,
-            "model": b.design.model,
-            "steps": b.check.steps,
-            "pieces": b.check.pieces,
-            "sub_builds": b.check.sub_builds,
-            "joints": b.check.joints,
-            "bridges": b.check.bridges,
-            "weak": b.check.weak.len(),
-            "repairs": b.check.repairs.len(),
-            "studs": b.model.studs,
-            "stale": b.stale,
-        })),
+        "atlas": loaded.as_ref().map(|l| atlas_summary(&l.atlas, &l.stale)),
         "ui_last_report": *s.ui.read().unwrap(),
         "uptime_s": s.uptime_s(),
+    })
+}
+
+pub fn atlas_summary(a: &terrarium_core::atlas::Atlas, stale: &Option<String>) -> Value {
+    json!({
+        "name": a.system.name,
+        "source": a.source,
+        "model": a.model,
+        "containers": a.containers.iter().filter(|c| !c.hidden).count(),
+        "components": a.containers.iter().filter(|c| !c.hidden).map(|c| c.components.len()).sum::<usize>(),
+        "people": a.people.len(),
+        "externals": a.externals.len(),
+        "relationships": a.relationships.len(),
+        "journeys": a.journeys.len(),
+        "backed": a.report.backed,
+        "survey": a.report.survey,
+        "claimed": a.report.claimed,
+        "stale": stale,
     })
 }
 
@@ -229,7 +234,7 @@ async fn health(State(ctx): State<Ctx>) -> Json<Value> {
         "nodes": graph.as_ref().map(|g| g.nodes.len()),
         "edges": graph.as_ref().map(|g| g.edges.len()),
         "scanning": s.scanning.load(Ordering::Relaxed),
-        "designing": s.designing.load(Ordering::Relaxed),
+        "discovering": s.discovering.load(Ordering::Relaxed),
         "fps": s.metrics.read().unwrap().fps,
         "errors": s.telemetry.errors.load(Ordering::Relaxed),
     }))
@@ -277,9 +282,15 @@ async fn scan(State(ctx): State<Ctx>, Json(req): Json<ScanReq>) -> ApiResult {
     Ok(Json(v))
 }
 
-async fn build(State(ctx): State<Ctx>) -> ApiResult {
-    let b = ctx.state.build().ok_or_else(|| "no repository loaded".to_string())?;
-    Ok(Json(serde_json::to_value(&*b).map_err(|e| e.to_string())?))
+async fn atlas_get(State(ctx): State<Ctx>) -> ApiResult {
+    Ok(Json(commands::atlas_value(&ctx.state)?))
+}
+
+async fn atlas_dsl(State(ctx): State<Ctx>) -> Result<Response, ApiError> {
+    let l = ctx.state.atlas().ok_or_else(|| "no repository loaded".to_string())?;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "text/plain; charset=utf-8".parse().unwrap());
+    Ok((headers, terrarium_core::atlas::to_dsl(&l.atlas)).into_response())
 }
 
 async fn graph_full(State(ctx): State<Ctx>) -> ApiResult {
@@ -332,62 +343,40 @@ async fn flows(State(ctx): State<Ctx>) -> ApiResult {
     Ok(Json(json!({ "flows": terrarium_core::query::flows(&g) })))
 }
 
-async fn resolve_body_node(ctx: &Ctx, body: &Value) -> Result<u32, ApiError> {
-    let g = ctx
-        .state
-        .graph()
-        .ok_or_else(|| "no repository loaded".to_string())?;
-    let s = body
-        .get("node")
-        .map(|v| match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        })
-        .ok_or_else(|| "missing `node`".to_string())?;
-    Ok(commands::resolve_node(&g, &s)?)
-}
-
 async fn select(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
-    let id = resolve_body_node(&ctx, &body).await?;
-    Ok(Json(
-        ask_frontend(&ctx, "select", json!({ "id": id }), 10000).await?,
-    ))
+    Ok(Json(ask_frontend(&ctx, "select", body, 10000).await?))
 }
 
-async fn step(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
-    Ok(Json(ask_frontend(&ctx, "step", body, 5000).await?))
+async fn level(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
+    Ok(Json(ask_frontend(&ctx, "level", body, 5000).await?))
 }
 
-async fn view(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
-    Ok(Json(ask_frontend(&ctx, "view", body, 5000).await?))
-}
-
-async fn tab(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
-    Ok(Json(ask_frontend(&ctx, "tab", body, 5000).await?))
+async fn journey(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
+    Ok(Json(ask_frontend(&ctx, "journey", body, 5000).await?))
 }
 
 #[derive(Deserialize)]
-struct DesignReq {
+struct DiscoverReq {
     model: Option<String>,
 }
 
-/// Runs the design agents to completion (minutes), then waits for the UI to show the new build.
-async fn design(State(ctx): State<Ctx>, body: Option<Json<DesignReq>>) -> ApiResult {
+/// Runs the discovery agents to completion (minutes), then waits for the UI to show the new atlas.
+async fn discover(State(ctx): State<Ctx>, body: Option<Json<DiscoverReq>>) -> ApiResult {
     let app = ctx.app.clone();
     let model = body.and_then(|b| b.0.model);
-    let run = tauri::async_runtime::spawn_blocking(move || commands::do_design(&app, model))
+    let run = tauri::async_runtime::spawn_blocking(move || commands::do_discover(&app, model))
         .await
         .map_err(|e| e.to_string())??;
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let ui = ask_frontend(&ctx, "state", json!({}), 2000).await.unwrap_or(Value::Null);
-    Ok(Json(json!({ "run": run, "build": backend_state(&ctx)["build"], "ui": ui })))
+    Ok(Json(json!({ "run": run, "atlas": backend_state(&ctx)["atlas"], "ui": ui })))
 }
 
-async fn design_reset(State(ctx): State<Ctx>) -> ApiResult {
-    commands::do_reset_design(&ctx.state)?;
-    let _ = ctx.app.emit("design:reset", json!({}));
+async fn discover_reset(State(ctx): State<Ctx>) -> ApiResult {
+    commands::do_reset_atlas(&ctx.state)?;
+    let _ = ctx.app.emit("discover:reset", json!({}));
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    Ok(Json(json!({ "build": backend_state(&ctx)["build"] })))
+    Ok(Json(json!({ "atlas": backend_state(&ctx)["atlas"] })))
 }
 
 async fn reset(State(ctx): State<Ctx>) -> ApiResult {
@@ -503,7 +492,7 @@ async fn metrics(State(ctx): State<Ctx>) -> ApiResult {
             "ipc_calls": s.counters.ipc_calls.load(Ordering::Relaxed),
             "bridge_requests": s.counters.bridge_requests.load(Ordering::Relaxed),
             "scans": s.counters.scans.load(Ordering::Relaxed),
-            "designs": s.counters.designs.load(Ordering::Relaxed),
+            "discoveries": s.counters.discoveries.load(Ordering::Relaxed),
             "frontend_errors": s.counters.frontend_errors.load(Ordering::Relaxed),
             "log_errors": s.telemetry.errors.load(Ordering::Relaxed),
             "log_warnings": s.telemetry.warnings.load(Ordering::Relaxed),

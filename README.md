@@ -1,7 +1,8 @@
 # Terrarium
 
-A cozy macOS app that builds a repository as a brick model, with a step-by-step manual
-for reading it, plus an agent-friendly CLI that does the same work from a shell.
+A macOS app that draws a repository as C4 diagrams you can read without reading the
+code, with Claude agents writing the words and an engine checking every arrow, plus an
+agent-friendly CLI that does the same work from a shell.
 
 Terrarium scans a multi-language repository (Rust, TypeScript, JavaScript, Python, Go)
 with tree-sitter, builds a graph of packages, files and symbols, resolves imports and
@@ -9,32 +10,32 @@ calls, and derives **cross-language data flows**: an HTTP call in TypeScript tha
 on a FastAPI route, a Tauri `invoke("cmd")` that reaches a `#[tauri::command]`, a Go
 `http.HandleFunc` that a Rust client hits, queue producers and consumers that share a topic.
 
-The graph then becomes a **brick model**. Each package is a district on a baseplate,
-each file a building, and each function or type a brick in it, coloured by language.
-Cross-language flows are amber bridges between districts. The model comes with a
-**manual**: files go in dependency order, so every step only adds pieces that rest on
-pieces already built, and playing it back is a reading order for the codebase. The
-engine checks every joint (import or call) and reports weak joints, files that depend
-on each other in a cycle ("interlocked"), loose files, and endpoints with no caller or
-no handler.
+The graph then becomes an **atlas**: the system in its context (who uses it, what it
+talks to), the containers it runs as, the components inside each, and the code. The
+engine draws it from the graph alone, so it is always available and always right about
+what connects to what; names come from folders. **Journeys** follow one request across
+the diagrams, numbered step by step.
 
-**Design with Claude** hands the words to agents. One Claude agent per sub-build reads
-that package's code (read-only tools) and writes its chapter: step groupings, titles and
-captions. An assembler names the model. The engine then checks and repairs what they
-wrote, so the manual can be imaginative and still hold together. Agents run through the
-Claude Code CLI (`claude -p`) on `claude-opus-5-5` by default. The fixture costs about
-$0.40 and takes 20 seconds.
+**Discover with Claude** hands the words to agents. A surveyor reads the manifests and
+entry points and decides what the system is, who uses it and what each package runs as.
+One agent per container reads its code and groups it into components named by what they
+do. One agent per journey narrates the crossings. An editor writes the summary, where to
+start and what is worth knowing. You watch it happen: which file each agent is reading,
+what it found as it lands on the diagram. Then the engine verifies every relationship
+against the code: backed (with the evidence), from the survey, or claimed and marked as
+such. Agents run through the Claude Code CLI (`claude -p`) on `claude-opus-5-5` by
+default, with read-only tools.
 
-The model is drawn with three.js (instanced bricks and studs, rendered on demand) in a
-vibrancy-backed Tauri window.
+The diagrams are SVG in a vibrancy-backed Tauri window, and export as Structurizr DSL.
 
 ```
-crates/terrarium-core     scanning, graph model, queries, the build (order, check, repair,
-                          geometry), the Claude designer, on-disk cache
+crates/terrarium-core     scanning, graph model, queries, the atlas (engine draft, check,
+                          journeys, export), the discovery orchestration, on-disk cache
 crates/terrarium-cli      `terrarium`: TOON output, structured errors, drives the app
 app/src-tauri             the desktop app: commands, telemetry, agent bridge, screenshots
-app/ui                    Vite + TypeScript frontend, three.js brick renderer
+app/ui                    Vite + TypeScript frontend: layout, diagrams, live discovery
 fixtures/polyglot         a small four-language repo used by the tests
+scripts/stand-in-claude.py  answers the agents' prompts for free, for tests and demos
 ```
 
 ## Build
@@ -45,7 +46,7 @@ and Xcode command line tools.
 ```sh
 cd app/ui && npm install && npm run build && cd ../..
 cargo build                     # terrarium (CLI) and terrarium-app (dev binary)
-cargo test --workspace          # scanner, traces, build engine, designer (stand-in agents), CLI
+cargo test --workspace          # scanner, atlas, discovery (stand-in agents), CLI
 scripts/verify.sh               # builds, tests, launches the app, checks it over the bridge
 ```
 
@@ -66,9 +67,8 @@ scripts/dev.sh
 ```sh
 terrarium                          # home: repo state, app status, next steps
 terrarium scan .                   # scan and cache the graph
-terrarium build                    # the brick model: size, sub-builds, joint check
-terrarium manual                   # the steps in reading order (--step N for one in full)
-terrarium design                   # have Claude write the manual (spends money; --reset to undo)
+terrarium atlas                    # containers and relationships (--level context|components, --dsl)
+terrarium discover                 # have Claude discover the atlas (spends money; --reset to undo)
 terrarium traces                   # end-to-end paths: entry → calls → boundaries → db/fs/queue
 terrarium trace web/src/app.ts#main  # one trace as a call tree
 terrarium endpoints --gaps         # routes nothing calls, calls nothing serves
@@ -78,6 +78,7 @@ terrarium boundaries --tag db      # everything touching a database
 terrarium show src/api.ts          # one node with neighbours and tags
 terrarium doctor                   # Claude Code, cache, app bridge
 terrarium app launch .             # start the app on this repo
+terrarium app discover             # discover in the app, watching it live
 terrarium app screenshot           # PNG of the window
 terrarium --json ...               # JSON instead of TOON
 ```
@@ -88,14 +89,15 @@ Output follows the AXI conventions: structured TOON on stdout, errors on stdout 
 ## Driving the app as an agent
 
 See [AGENTS.md](AGENTS.md). Short version: the app serves a localhost HTTP bridge
-(`terrarium app ...` wraps it). It reports state, frame metrics, memory, span timings and
-logs; it accepts selection, step, camera view, tab and design commands; it takes native
-screenshots; it evaluates JavaScript in the webview; and it can click and type by
+(`terrarium app ...` wraps it). It reports state, the atlas, frame metrics, memory, span
+timings and logs; it accepts level, selection, journey and discovery commands; it takes
+native screenshots; it evaluates JavaScript in the webview; and it can click and type by
 `data-testid`.
 
 ## Design
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the visual brief and tokens.
+See [docs/DESIGN.md](docs/DESIGN.md) for the visual brief, the tokens, and how an atlas
+is made and checked.
 
 ## License
 

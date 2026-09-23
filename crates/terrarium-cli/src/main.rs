@@ -12,9 +12,10 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use terrarium_core::{Graph, NodeKind, ScanOptions, build, cache, designer, query};
+use terrarium_core::atlas::{self, Atlas};
+use terrarium_core::{Graph, NodeKind, ScanOptions, cache, discovery, query};
 
-const DESCRIPTION: &str = "Scan multi-language repositories, build them as a brick model with a dependency-ordered manual, trace data across languages, and drive the Terrarium app";
+const DESCRIPTION: &str = "Scan multi-language repositories, draw them as C4 diagrams (context, containers, components, code) with every relationship backed by evidence, trace data across languages, and drive the Terrarium app";
 
 #[derive(Parser)]
 #[command(name = "terrarium", version, about = DESCRIPTION, disable_help_subcommand = true)]
@@ -127,24 +128,27 @@ enum Cmd {
     },
     /// Shortest connection between two nodes (ids or paths).
     Path { from: String, to: String },
-    /// The repository as a brick model: size, sub-builds and the joint check
-    /// (weak joints, interlocked files, loose files).
-    Build,
-    /// The build manual: files in the order that each only rests on what came before.
-    /// Examples: `terrarium manual`, `terrarium manual --step 4`.
-    Manual {
-        /// Show one step in full (1-based).
+    /// The atlas: the system in context, its containers, their components, and every
+    /// relationship with the code that backs it. Examples: `terrarium atlas`,
+    /// `terrarium atlas --level components --container api`, `terrarium atlas --dsl`.
+    Atlas {
+        /// Which diagram: context, containers, or components (of one container).
+        #[arg(long, value_enum, default_value = "containers")]
+        level: LevelArg,
+        /// Container (id, package or name) for `--level components`.
         #[arg(long)]
-        step: Option<usize>,
-        #[arg(long, default_value_t = 60)]
-        limit: usize,
+        container: Option<String>,
+        /// Print the whole atlas as Structurizr DSL instead.
+        #[arg(long)]
+        dsl: bool,
     },
-    /// Have Claude design the manual: one agent per sub-build reads the code and
-    /// writes steps and captions, an assembler names the model, and the engine
-    /// checks and repairs every joint. Saves the design for the app. Spends money.
-    /// Examples: `terrarium design`, `terrarium design --model claude-opus-5-5`, `terrarium design --reset`.
-    Design {
-        /// Model for the agents (default claude-opus-5-5, or TERRARIUM_DESIGN_MODEL).
+    /// Have Claude discover the atlas: a surveyor reads the manifests and entry points,
+    /// one agent per container groups its code into components, one agent per journey
+    /// narrates a path across the system, an editor writes the guide, and the engine
+    /// checks every relationship against the code. Saves the atlas for the app. Spends money.
+    /// Examples: `terrarium discover`, `terrarium discover --model claude-opus-5-5`, `terrarium discover --reset`.
+    Discover {
+        /// Model for the agents (default claude-opus-5-5, or TERRARIUM_DISCOVERY_MODEL).
         #[arg(long)]
         model: Option<String>,
         /// Agents running at once.
@@ -153,7 +157,10 @@ enum Cmd {
         /// Spending cap per agent, in US dollars.
         #[arg(long, default_value_t = 2.0)]
         budget: f64,
-        /// Forget the saved design and use the engine's.
+        /// Journeys to narrate.
+        #[arg(long, default_value_t = 4)]
+        journeys: usize,
+        /// Forget the saved atlas and use the engine's.
         #[arg(long)]
         reset: bool,
     },
@@ -191,34 +198,38 @@ enum AppCmd {
     },
     /// Scan and open a repository in the app.
     Open { path: PathBuf },
-    /// Full UI state: repo, tab, step, view, selection, panels, build summary.
+    /// Full UI state: repo, level, focus, selection, journey, panels, atlas summary.
     State,
-    /// Select a file or symbol by id or path.
-    Select { node: String },
+    /// Select an atlas element (container, component, person, external) by id or name, or a file by path.
+    Select { element: String },
     /// Search in the app's search box.
     Search { query: String },
-    /// Scrub the build to a manual step (1-based; 0 is the empty baseplate; omit for the finished model).
-    Step { step: Option<usize> },
-    /// Point the camera at the model: `iso`, `front` or `top`, `--spin`, `--fit`.
-    View {
+    /// Go to a diagram level: `context`, `containers`, `components` (of a container) or `code` (of a component).
+    Level {
         #[arg(value_enum)]
-        view: Option<ViewArg>,
-        /// Turn the turntable on or off.
+        level: LevelArg,
+        /// Container or component to focus (id or name).
         #[arg(long)]
-        spin: Option<bool>,
+        focus: Option<String>,
+    },
+    /// Play a journey on the diagrams (id or name), optionally at a 1-based step; `--stop` clears it.
+    Journey {
+        journey: Option<String>,
         #[arg(long)]
-        fit: bool,
+        step: Option<usize>,
+        #[arg(long)]
+        stop: bool,
     },
-    /// Switch the main tab.
-    Tab {
-        #[arg(value_enum)]
-        tab: TabArg,
+    /// The atlas the app is showing (or `--dsl` for Structurizr DSL).
+    Atlas {
+        #[arg(long)]
+        dsl: bool,
     },
-    /// Have Claude design the manual in the app (blocks until done; spends money).
-    Design {
+    /// Have Claude discover the atlas in the app (blocks until done; spends money).
+    Discover {
         #[arg(long)]
         model: Option<String>,
-        /// Forget the saved design and use the engine's.
+        /// Forget the saved atlas and use the engine's.
         #[arg(long)]
         reset: bool,
     },
@@ -253,26 +264,18 @@ enum AppCmd {
     Click { testid: String },
     /// Type into an element by its data-testid.
     Type { testid: String, text: String },
-    /// Clear selection and highlights, show the finished model, fit the camera.
+    /// Context level, no selection, no journey, fit.
     Reset,
     /// Quit the app.
     Quit,
 }
 
 #[derive(Clone, Copy, ValueEnum, Debug)]
-enum ViewArg {
-    Iso,
-    Front,
-    Top,
-}
-
-#[derive(Clone, Copy, ValueEnum, Debug)]
-enum TabArg {
-    Model,
-    Manual,
-    Parts,
-    Traces,
-    Design,
+enum LevelArg {
+    Context,
+    Containers,
+    Components,
+    Code,
 }
 
 #[derive(Clone, Copy, ValueEnum, Debug)]
@@ -696,45 +699,46 @@ fn run(cli: Cli) -> Result<Value> {
                 ),
             }
         }
-        Some(Cmd::Build) => {
+        Some(Cmd::Atlas { level, container, dsl }) => {
             let g = load_graph(&root)?;
-            let b = build::for_graph(&g, cache::load_design(Path::new(&g.root)));
-            Ok(build_value(&g, &b, true))
+            let (a, stale) = atlas::for_graph(&g, cache::load_atlas(Path::new(&g.root)));
+            if dsl {
+                return Ok(json!({ "dsl": atlas::to_dsl(&a) }));
+            }
+            atlas_value(&a, stale.as_deref(), level, container.as_deref(), true)
         }
-        Some(Cmd::Manual { step, limit }) => {
-            let g = load_graph(&root)?;
-            let b = build::for_graph(&g, cache::load_design(Path::new(&g.root)));
-            manual_value(&b, step, limit)
-        }
-        Some(Cmd::Design { model, parallel, budget, reset }) => {
+        Some(Cmd::Discover { model, parallel, budget, journeys, reset }) => {
             let g = load_graph(&root)?;
             let groot = Path::new(&g.root).to_path_buf();
             if reset {
-                let had = cache::clear_design(&groot)?;
-                let b = build::for_graph(&g, None);
-                let mut v = build_value(&g, &b, false);
-                v["design"] = json!(if had { "reset to the engine's design" } else { "already the engine's design (no-op)" });
+                let had = cache::clear_atlas(&groot)?;
+                let a = atlas::engine_atlas(&g);
+                let mut v = atlas_value(&a, None, LevelArg::Containers, None, false)?;
+                v["discover"] = json!(if had { "reset to the engine's atlas" } else { "already the engine's atlas (no-op)" });
                 return Ok(v);
             }
-            let mut opts = designer::Options { parallel, budget_usd: budget, ..designer::Options::default() };
+            let mut opts = discovery::Options { parallel, budget_usd: budget, max_journeys: journeys, ..discovery::Options::default() };
             if let Some(m) = model {
                 opts.model = m;
             }
-            let runner = designer::claude_runner(&groot, &opts);
+            let runner = discovery::claude_runner(&groot, &opts);
             // Progress is for people watching; agents read the result on stdout.
-            let progress = |p: designer::Progress| eprintln!("{}", serde_json::to_string(&p).unwrap_or_default());
-            let (design, run) = designer::design(&g, &opts, &runner, &progress)?;
-            cache::store_design(&groot, &design)?;
-            let b = build::for_graph(&g, Some(design));
+            let progress = |p: discovery::Progress| {
+                if !matches!(p, discovery::Progress::Verified { .. }) {
+                    eprintln!("{}", serde_json::to_string(&p).unwrap_or_default());
+                }
+            };
+            let (a, run) = discovery::discover(&g, &opts, &runner, &progress)?;
+            cache::store_atlas(&groot, &a)?;
             let mut v = json!({
                 "run": {
                     "model": run.model,
                     "cost_usd": (run.cost_usd * 100.0).round() / 100.0,
                     "secs": run.secs.round(),
-                    "agents": run.agents.iter().map(|a| json!({ "role": a.role, "ok": a.ok, "cost_usd": (a.cost_usd * 100.0).round() / 100.0, "secs": a.secs.round(), "error": a.error.clone().unwrap_or_default() })).collect::<Vec<_>>(),
+                    "agents": run.agents.iter().map(|r| json!({ "role": r.role, "target": r.target.clone().unwrap_or_default(), "ok": r.ok, "reads": r.reads, "cost_usd": (r.cost_usd * 100.0).round() / 100.0, "secs": r.secs.round(), "error": r.error.clone().unwrap_or_default() })).collect::<Vec<_>>(),
                 },
             });
-            let summary = build_value(&g, &b, false);
+            let summary = atlas_value(&a, None, LevelArg::Containers, None, false)?;
             for (k, val) in summary.as_object().unwrap() {
                 v[k] = val.clone();
             }
@@ -755,89 +759,91 @@ fn kind_label(k: NodeKind) -> &'static str {
     }
 }
 
-/// The build summary every build-related command prints.
-fn build_value(g: &Graph, b: &build::Build, with_help: bool) -> Value {
-    let c = &b.check;
-    let d = &b.design;
-    let files_in = |id: &str| d.steps.iter().filter(|s| s.sub_build == id).map(|s| s.files.len()).sum::<usize>();
-    let mut v = json!({
-        "build": {
-            "title": d.title,
-            "source": match &d.model { Some(m) => format!("{} ({m})", d.source), None => d.source.clone() },
-            "summary": d.summary,
-            "pieces": c.pieces,
-            "steps": c.steps,
-            "sub_builds": c.sub_builds,
-            "studs": format!("{}x{}", b.model.studs.0, b.model.studs.1),
-            "joints": c.joints,
-            "bridges": c.bridges,
-            "check": if c.ok { "holds together: 0 weak joints".to_string() } else { format!("{} weak joints", c.weak.len()) },
-        },
-        "sub_builds": d.sub_builds.iter().map(|s| json!({ "id": s.id, "name": s.name, "files": files_in(&s.id), "steps": d.steps.iter().filter(|x| x.sub_build == s.id).count() })).collect::<Vec<_>>(),
-    });
-    if !c.weak.is_empty() {
-        v["weak"] = json!(c.weak.iter().map(|w| json!({ "kind": w.kind, "file": w.file, "detail": w.detail })).collect::<Vec<_>>());
-    }
-    if !c.repairs.is_empty() {
-        v["repairs"] = json!(c.repairs);
-    }
-    v["interlocked"] = if c.interlocked.is_empty() { json!("none: no files depend on each other in a cycle") } else { json!(c.interlocked.iter().map(|g| g.join(" ")).collect::<Vec<_>>()) };
-    v["loose"] = if c.loose.is_empty() { json!("none") } else { json!(c.loose) };
-    v["gaps"] = json!(format!("{} endpoints with no caller or no handler", c.gaps));
-    if let Some(st) = &b.stale {
-        v["stale"] = json!(st);
-    }
-    let _ = g;
-    if with_help {
-        let mut help = vec!["Run `terrarium manual` for the steps in reading order".to_string()];
-        if d.source == "engine" {
-            help.push("Run `terrarium design` to have Claude write the manual (spends money)".into());
-        } else {
-            help.push("Run `terrarium design --reset` to go back to the engine's manual".into());
+fn element_name(a: &Atlas, id: &str) -> String {
+    for c in &a.containers {
+        if c.id == id {
+            return c.name.clone();
         }
-        if c.gaps > 0 {
-            help.push("Run `terrarium endpoints --gaps` for the gaps".into());
+        for k in &c.components {
+            if k.id == id {
+                return format!("{} / {}", c.name, k.name);
+            }
         }
-        v["help"] = json!(help);
     }
-    v
+    a.people.iter().find(|p| p.id == id).map(|p| p.name.clone()).or_else(|| a.externals.iter().find(|x| x.id == id).map(|x| x.name.clone())).or_else(|| a.journeys.iter().find(|j| j.id == id).map(|j| j.name.clone())).unwrap_or_else(|| id.to_string())
 }
 
-fn manual_value(b: &build::Build, step: Option<usize>, limit: usize) -> Result<Value> {
-    let d = &b.design;
-    let name_of = |id: &str| d.sub_builds.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string());
-    if let Some(n) = step {
-        let s = d.steps.get(n.wrapping_sub(1)).ok_or_else(|| anyhow!("no step {n}: the manual has {} steps", d.steps.len()))?;
-        let mut v = json!({
-            "step": format!("{n} of {}", d.steps.len()),
-            "sub_build": name_of(&s.sub_build),
-            "title": s.title,
-            "caption": s.caption,
-            "files": s.files,
-        });
-        let mut help = vec![];
-        if n > 1 {
-            help.push(format!("Run `terrarium manual --step {}` for the previous step", n - 1));
+fn rel_row(a: &Atlas, r: &atlas::Relationship) -> Value {
+    json!({
+        "from": element_name(a, &r.from),
+        "to": element_name(a, &r.to),
+        "label": r.label,
+        "technology": r.technology,
+        "source": r.source,
+        "evidence": r.evidence.len(),
+    })
+}
+
+/// One diagram of the atlas, as the CLI prints it.
+fn atlas_value(a: &Atlas, stale: Option<&str>, level: LevelArg, container: Option<&str>, with_help: bool) -> Result<Value> {
+    let shown: Vec<&atlas::Container> = a.containers.iter().filter(|c| !c.hidden).collect();
+    let mut v = json!({
+        "atlas": {
+            "system": a.system.name,
+            "source": match &a.model { Some(m) => format!("{} ({m})", a.source), None => a.source.clone() },
+            "purpose": a.system.purpose,
+            "summary": a.system.summary,
+            "containers": shown.len(),
+            "components": shown.iter().map(|c| c.components.len()).sum::<usize>(),
+            "people": a.people.len(),
+            "externals": a.externals.len(),
+            "journeys": a.journeys.len(),
+            "check": format!("{} relationships backed by code, {} from the survey, {} claimed", a.report.backed, a.report.survey, a.report.claimed),
+        },
+    });
+    match level {
+        LevelArg::Context => {
+            v["people"] = json!(a.people.iter().map(|p| json!({ "name": p.name, "description": p.description })).collect::<Vec<_>>());
+            v["externals"] = json!(a.externals.iter().map(|x| json!({ "name": x.name, "kind": x.kind, "description": x.description })).collect::<Vec<_>>());
+            v["relationships"] = json!(a.relationships.iter().filter(|r| r.level == "container" && (r.from.starts_with("p:") || r.to.starts_with("x:") || r.from.starts_with("x:"))).map(|r| rel_row(a, r)).collect::<Vec<_>>());
         }
-        if n < d.steps.len() {
-            help.push(format!("Run `terrarium manual --step {}` for the next step", n + 1));
+        LevelArg::Containers => {
+            v["containers"] = json!(shown.iter().map(|c| json!({ "id": c.id, "name": c.name, "kind": c.kind, "technology": c.technology, "components": c.components.len(), "description": c.description })).collect::<Vec<_>>());
+            v["relationships"] = json!(a.relationships.iter().filter(|r| r.level == "container").map(|r| rel_row(a, r)).collect::<Vec<_>>());
         }
+        LevelArg::Components | LevelArg::Code => {
+            let c = match container {
+                Some(q) => shown.iter().find(|c| c.id == q || c.package == q || c.name.eq_ignore_ascii_case(q) || c.id == format!("c:{}", atlas::slug(q))).copied().ok_or_else(|| anyhow!("no container `{q}`; run `terrarium atlas` to list them"))?,
+                None => *shown.first().ok_or_else(|| anyhow!("the atlas has no containers"))?,
+            };
+            v["container"] = json!({ "id": c.id, "name": c.name, "kind": c.kind, "technology": c.technology, "description": c.description, "responsibilities": c.responsibilities });
+            v["components"] = json!(c.components.iter().map(|k| json!({ "id": k.id, "name": k.name, "files": k.files.len(), "description": k.description, "paths": k.files.join(" ") })).collect::<Vec<_>>());
+            v["relationships"] = json!(a.relationships.iter().filter(|r| r.level == "component" && (r.from.starts_with(&c.id) || r.to.starts_with(&c.id))).map(|r| rel_row(a, r)).collect::<Vec<_>>());
+        }
+    }
+    if !a.journeys.is_empty() {
+        v["journeys"] = json!(a.journeys.iter().map(|j| json!({ "id": j.id, "name": j.name, "steps": j.steps.len(), "entry": j.entry })).collect::<Vec<_>>());
+    }
+    if !a.guide.callouts.is_empty() {
+        v["callouts"] = json!(a.guide.callouts.iter().map(|c| json!({ "title": c.title, "detail": c.detail })).collect::<Vec<_>>());
+    }
+    if !a.report.notes.is_empty() {
+        v["notes"] = json!(a.report.notes);
+    }
+    if let Some(st) = stale {
+        v["stale"] = json!(st);
+    }
+    if with_help {
+        let mut help = vec!["Run `terrarium atlas --level context` for people and outside systems".to_string(), "Run `terrarium atlas --level components --container <name>` for one container's components".to_string()];
+        if a.source == "engine" {
+            help.push("Run `terrarium discover` to have Claude read the code and name every part (spends money)".into());
+        } else {
+            help.push("Run `terrarium discover --reset` to go back to the engine's atlas".into());
+        }
+        help.push("Run `terrarium atlas --dsl` for Structurizr DSL".into());
         v["help"] = json!(help);
-        return Ok(v);
     }
-    let total = d.steps.len();
-    let rows: Vec<Value> = d
-        .steps
-        .iter()
-        .enumerate()
-        .take(limit)
-        .map(|(i, s)| json!({ "n": i + 1, "sub_build": name_of(&s.sub_build), "title": s.title, "files": s.files.iter().map(|f| f.rsplit('/').next().unwrap_or(f)).collect::<Vec<_>>().join(" ") }))
-        .collect();
-    let mut help = vec!["Run `terrarium manual --step <n>` for a step's caption and full paths".to_string()];
-    if total > limit {
-        help.push(format!("Run `terrarium manual --limit {total}` for all {total} steps"));
-    }
-    Ok(json!({ "manual": format!("{} by {}", d.title, d.source), "count": format!("{} of {total} steps", rows.len()), "steps": rows, "help": help }))
+    Ok(v)
 }
 
 fn stats_value(g: &Graph) -> Value {
@@ -883,8 +889,8 @@ fn home(root: &Path) -> Result<Value> {
     if v["repo"].is_string() {
         help.push("Run `terrarium scan` to analyse this repository".to_string());
     } else {
-        help.push("Run `terrarium build` for the brick model and its joint check".to_string());
-        help.push("Run `terrarium manual` for the files in reading order".to_string());
+        help.push("Run `terrarium atlas` for the C4 diagrams: containers, components, relationships".to_string());
+        help.push("Run `terrarium discover` to have Claude name every part (spends money)".to_string());
         help.push("Run `terrarium traces` for end-to-end paths across languages".to_string());
         help.push("Run `terrarium endpoints --gaps` for routes nobody calls and calls nobody serves".to_string());
         help.push(
@@ -905,7 +911,7 @@ fn home(root: &Path) -> Result<Value> {
 }
 
 fn doctor(root: &Path) -> Result<Value> {
-    let claude = designer::find_claude();
+    let claude = discovery::find_claude();
     let claude_version = std::process::Command::new(&claude)
         .arg("--version")
         .stdin(std::process::Stdio::null())
@@ -926,8 +932,8 @@ fn doctor(root: &Path) -> Result<Value> {
         "bin": bin_path(),
         "version": env!("CARGO_PKG_VERSION"),
         "claude": match &claude_version {
-            Some(v) => json!({ "available": true, "bin": claude.to_string_lossy(), "version": v, "design_model": designer::Options::default().model }),
-            None => json!({ "available": false, "bin": claude.to_string_lossy(), "detail": "`terrarium design` needs Claude Code; install it or set TERRARIUM_CLAUDE" }),
+            Some(v) => json!({ "available": true, "bin": claude.to_string_lossy(), "version": v, "discovery_model": discovery::Options::default().model }),
+            None => json!({ "available": false, "bin": claude.to_string_lossy(), "detail": "`terrarium discover` needs Claude Code; install it or set TERRARIUM_CLAUDE" }),
         },
         "cache": { "dir": home.to_string_lossy(), "graphs": idx.entries.len(), "current_repo_cached": cache::find_entry(root).is_some() },
         "app": app,
@@ -997,19 +1003,24 @@ fn app(cmd: AppCmd) -> Result<Value> {
         }
         AppCmd::Open { path } => b.post("/scan", json!({ "path": abs(&path)? })),
         AppCmd::State => b.get("/state"),
-        AppCmd::Select { node } => b.post("/select", json!({ "node": node })),
+        AppCmd::Select { element } => b.post("/select", json!({ "element": element })),
         AppCmd::Search { query } => b.post("/search", json!({ "q": query })),
-        AppCmd::Step { step } => b.post("/step", json!({ "step": step })),
-        AppCmd::View { view, spin, fit } => b.post(
-            "/view",
-            json!({ "view": view.map(|v| format!("{v:?}").to_lowercase()), "spin": spin, "fit": fit }),
-        ),
-        AppCmd::Tab { tab } => b.post("/tab", json!({ "tab": format!("{tab:?}").to_lowercase() })),
-        AppCmd::Design { model, reset } => {
-            if reset {
-                b.post("/design/reset", json!({}))
+        AppCmd::Level { level, focus } => b.post("/level", json!({ "level": format!("{level:?}").to_lowercase(), "focus": focus })),
+        AppCmd::Journey { journey, step, stop } => b.post("/journey", if stop { json!({}) } else { json!({ "journey": journey, "step": step }) }),
+        AppCmd::Atlas { dsl } => {
+            if dsl {
+                Ok(json!({ "dsl": String::from_utf8_lossy(&b.get_bytes("/atlas/dsl")?).to_string() }))
             } else {
-                b.post_long("/design", json!({ "model": model }))
+                let v = b.get("/atlas")?;
+                let a: Atlas = serde_json::from_value(v["atlas"].clone()).context("the app returned an atlas this CLI cannot read")?;
+                atlas_value(&a, v["stale"].as_str(), LevelArg::Containers, None, false)
+            }
+        }
+        AppCmd::Discover { model, reset } => {
+            if reset {
+                b.post("/discover/reset", json!({}))
+            } else {
+                b.post_long("/discover", json!({ "model": model }))
             }
         }
         AppCmd::Screenshot { out } => {

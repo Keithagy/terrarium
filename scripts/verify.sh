@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end verification an agent can run unattended:
-# build → unit tests → launch the app on the fixture → exercise the bridge → screenshot → quit.
+# build → unit tests → CLI on the fixture → launch the app → exercise the bridge →
+# a discovery with the stand-in claude (nothing spent) → screenshot → quit.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -8,6 +9,8 @@ OUT=$(cd "$(dirname "${VERIFY_OUT:-target/verify}")" 2>/dev/null && pwd)/$(basen
 mkdir -p "$OUT"
 export TERRARIUM_HOME=${TERRARIUM_HOME:-$OUT/home}
 export TERRARIUM_PORT=${TERRARIUM_PORT:-47399}
+export TERRARIUM_CLAUDE=${TERRARIUM_CLAUDE:-$PWD/scripts/stand-in-claude.py}
+export STANDIN_DELAY=${STANDIN_DELAY:-0}
 T=target/debug/terrarium
 
 step() { printf '\n== %s\n' "$*"; }
@@ -34,52 +37,60 @@ step "tests"
 cargo test --workspace > "$OUT/test.log" 2>&1 || { grep -E "FAILED|panicked" -A 6 "$OUT/test.log"; fail "cargo test"; }
 grep -E "^test result" "$OUT/test.log"
 
-step "cli scan"
+step "cli scan and queries"
 expect "scan" "^flows: 5" "$T" scan fixtures/polyglot
 expect "flows" "ipc scan_repo" "$T" --repo fixtures/polyglot flows
 expect "traces" "app.ts#main,4,typescript>python>rust>go" "$T" --repo fixtures/polyglot traces
 expect "trace" "store.go#open:13\",call,db" "$T" --repo fixtures/polyglot trace web/src/app.ts#main
 expect "endpoints" "api/reports,no-handler" "$T" --repo fixtures/polyglot endpoints --gaps
-expect "build" "check: \"holds together: 0 weak joints\"" "$T" --repo fixtures/polyglot build
-expect "manual" "Add commands.rs" "$T" --repo fixtures/polyglot manual
-expect "manual step" "rests on jobs.rs" "$T" --repo fixtures/polyglot manual --step 4
 expect "doctor" "^claude:" "$T" doctor
+
+step "cli atlas"
+"$T" --repo fixtures/polyglot discover --reset > /dev/null
+expect "atlas" "check: \"24 relationships backed by code, 2 from the survey, 0 claimed\"" "$T" --repo fixtures/polyglot atlas
+expect "atlas containers" "\"c:polyglot-native\",Polyglot Native,desktop" "$T" --repo fixtures/polyglot atlas
+expect "atlas context" "Database \(DATABASE_URL\),database" "$T" --repo fixtures/polyglot atlas --level context
+expect "atlas components" "Polyglot Api / Services,Queue \(REDIS_URL\),puts work on" "$T" --repo fixtures/polyglot atlas --level components --container polyglot-api
+expect "atlas dsl" "systemContext s" "$T" --repo fixtures/polyglot atlas --dsl
+
+step "cli discover (stand-in claude, nothing spent)"
+expect "discover" "system: Polyglot Town" "$T" --repo fixtures/polyglot discover
+expect "discover check" "claimed" "$T" --repo fixtures/polyglot atlas
+expect "discover reset" "reset to the engine's atlas" "$T" --repo fixtures/polyglot discover --reset
 
 step "launch app"
 "$T" app quit >/dev/null 2>&1
 sleep 0.5
 expect "launch" "graph_loaded: true" "$T" app launch fixtures/polyglot
 
-step "brick model"
+step "diagrams"
 sleep 0.5
-expect "state" "tab: model" "$T" app state
-expect "chips" "holds together" "$T" app ui
-expect "step" "step_title: Add commands.rs" "$T" app step 4
-expect "empty plate" "^step: 0" "$T" app step 0
-expect "manual" "tab: manual" "$T" app tab manual
-expect "manual page" "page-title" "$T" app ui
-expect "finished" "^step: 10" "$T" app step
-expect "view" "^view: top" "$T" app view top
-expect "parts" "tab: parts" "$T" app tab parts
-expect "parts ui" "parts-table" "$T" app ui
-expect "design tab" "tab: design" "$T" app tab design
-expect "design ui" "engine design" "$T" app ui
+expect "state" "level: containers" "$T" app state
+expect "chips" "engine draft" "$T" app ui
+expect "context" "level: context" "$T" app level context
+expect "components" "focus_name: Polyglot Api" "$T" app level components --focus polyglot-api
+expect "select" "selection_name: Services" "$T" app select Services
+expect "card" "title: Services" "$T" app ui
+expect "code" "level: code" "$T" app level code --focus "c:polyglot-api/services"
+expect "code ui" "code-title" "$T" app ui
+expect "journey" "journey_step: 2" "$T" app journey "j:web-src-app-ts-main" --step 2
+expect "journey ui" "journey-caption" "$T" app ui
+expect "reset" "journey: null" "$T" app reset
 
-step "traces"
-expect "endpoint" "tab: traces" "$T" app click "endpoint-http /api/jobs"
-expect "trace ui" "Crosses 4 boundaries through TypeScript, Python, Rust and Go" "$T" app ui
-expect "show on model" "trace_on_model: true" "$T" app click trace-show-model
+step "discover in the app (stand-in claude)"
+expect "app discover" "backed: 2[0-9]" "$T" app discover
+expect "discovered" "discovered by" "$T" app ui
+expect "notes" "Field notes" "$T" app ui
+expect "app reset atlas" "source: engine" "$T" app discover --reset
 
 step "bridge checks"
-expect "select" "selection_path: web/src/api.ts" "$T" app select web/src/api.ts
-expect "ui" "title: api.ts" "$T" app ui
 expect "search" "fetchUsers" "$T" app search fetch
-expect "reset" "trace_on_model: false" "$T" app reset
 expect "metrics" "frontend_errors: 0" "$T" app metrics
 expect "warnings" "^count: 0" "$T" app logs --level warn
-expect "profile" "assemble_build" "$T" app profile
+expect "profile" "assemble_atlas" "$T" app profile
 expect "screenshot" "^bytes: [0-9]{4,}" "$T" app screenshot --out "$OUT/app.png"
-expect "eval" "result: [1-9]" "$T" app eval 'store.build.model.bricks.length'
+expect "eval" "result: 4" "$T" app eval 'terrarium.containers().length'
+expect "atlas api" "system: Polyglot" "$T" app atlas
 
 step "quit"
 "$T" app quit >/dev/null
