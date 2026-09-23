@@ -1,12 +1,12 @@
-// Agent hooks. The backend forwards `/select`, `/step`, `/view`, `/tab`, `/ui`, `/eval`… as `bridge:request`
-// events; we answer with `bridge_reply`. Everything is also reachable from the
-// devtools console via `window.__terrarium`.
+// Agent hooks. The backend forwards `/select`, `/level`, `/journey`, `/ui`, `/eval`…
+// as `bridge:request` events; we answer with `bridge_reply`. Everything is also
+// reachable from the devtools console via `window.__terrarium`.
 
 import { api, log, on } from "./tauri";
-import { store, snapshot, select, emit, setStep, setTab, stepCount, type Tab } from "./store";
-import type { BrickScene, View } from "./bricks";
+import { store, snapshot, select, setLevel, setJourney, setJourneyStep, elementById, shownContainers, type Level } from "./store";
 import type { Actions } from "./panels";
-import { jumpTo } from "./panels";
+import { jumpTo, playJourney } from "./panels";
+import { exportSvg, fit } from "./atlas";
 
 interface BridgeRequest {
   id: number;
@@ -14,64 +14,85 @@ interface BridgeRequest {
   payload: Record<string, unknown>;
 }
 
-export function initBridge(scene: BrickScene, actions: Actions): void {
+/** An element by id, name, package or file path. */
+function resolveElement(s: string): string | null {
+  const a = store.atlas;
+  if (!a) return null;
+  if (elementById(s)) return s;
+  const q = s.trim().toLowerCase();
+  if (q === a.system.name.toLowerCase() || q === "system") return "s";
+  for (const c of a.containers) {
+    if (c.name.toLowerCase() === q || c.package.toLowerCase() === q) return c.id;
+    for (const k of c.components) if (k.name.toLowerCase() === q || `${c.name}/${k.name}`.toLowerCase() === q) return k.id;
+  }
+  for (const p of a.people) if (p.name.toLowerCase() === q) return p.id;
+  for (const x of a.externals) if (x.name.toLowerCase() === q) return x.id;
+  for (const c of a.containers) for (const k of c.components) if (k.files.includes(s)) return `path:${s}`;
+  return null;
+}
+
+export function initBridge(actions: Actions): void {
   const handlers: Record<string, (p: Record<string, unknown>) => Promise<unknown> | unknown> = {
-    state: () => ({ ...snapshot(), frame: scene.stats() }),
-    select: (p) => {
-      const id = Number(p.id);
+    state: () => snapshot(),
+    select: async (p) => {
+      const q = String(p.element ?? p.node ?? "");
+      const id = resolveElement(q);
+      if (!id) return { error: `no element matches \`${q}\`` };
       jumpTo(id);
-      return { ...snapshot(), selected: store.selection === id };
+      await settled(350);
+      return { ...snapshot(), selected: store.selection };
     },
-    step: async (p) => {
-      const n = p.step == null ? stepCount() : Number(p.step);
-      if (!Number.isFinite(n) || n < 0 || n > stepCount()) return { error: `step must be 0..${stepCount()}` };
-      setStep(n);
-      await settled(450);
-      return snapshot();
-    },
-    view: async (p) => {
-      if (typeof p.view === "string") {
-        if (!["iso", "front", "top"].includes(p.view)) return { error: "view must be iso, front or top" };
-        store.view = p.view as View;
-        scene.setView(store.view);
+    level: async (p) => {
+      const level = String(p.level ?? "");
+      if (!["context", "containers", "components", "code"].includes(level)) return { error: "level must be context, containers, components or code" };
+      let focus: string | null = null;
+      if (level === "components" || level === "code") {
+        const q = p.focus ? String(p.focus) : "";
+        const id = q ? resolveElement(q) : store.selection ?? store.focus;
+        if (!id) return { error: `${level} needs a focus: a ${level === "code" ? "component" : "container"} id or name` };
+        const e = elementById(id.startsWith("path:") ? "" : id);
+        if (level === "components") focus = e?.kind === "container" ? e.container.id : e?.kind === "component" ? e.container.id : null;
+        else focus = e?.kind === "component" ? e.component.id : null;
+        if (!focus) return { error: `\`${q || id}\` is not a ${level === "code" ? "component" : "container"}` };
       }
-      if (typeof p.spin === "boolean") { store.spin = p.spin; scene.setSpin(p.spin); }
-      if (p.fit) scene.fit();
-      emit("view");
-      await settled(700);
+      setLevel(level as Level, focus);
+      await settled(350);
       return snapshot();
     },
-    tab: async (p) => {
-      const t = String(p.tab);
-      if (!["model", "manual", "parts", "traces", "design"].includes(t)) return { error: "tab must be model, manual, parts, traces or design" };
-      setTab(t as Tab);
-      await settled(250);
-      return snapshot();
+    journey: async (p) => {
+      if (p.journey == null) { setJourney(null); await settled(100); return snapshot(); }
+      const q = String(p.journey).toLowerCase();
+      const j = store.atlas?.journeys.find((x) => x.id === q || x.name.toLowerCase() === q || x.entry.toLowerCase() === q);
+      if (!j) return { error: `no journey matches \`${p.journey}\`` };
+      playJourney(j, p.step == null ? 0 : Number(p.step));
+      if (p.step != null) setJourneyStep(Number(p.step));
+      await settled(350);
+      return { ...snapshot(), steps: j.steps.map((s, i) => ({ n: i + 1, from: s.from, to: s.to, label: s.label, caption: s.caption })) };
     },
     search: async (p) => {
       const input = document.querySelector<HTMLInputElement>("#search")!;
       input.value = String(p.q ?? "");
       input.focus();
       input.dispatchEvent(new Event("input", { bubbles: true }));
-      await sleep(250);
+      await sleep(300);
       const results = [...document.querySelectorAll<HTMLElement>("#search-results li")].map((li) => li.textContent?.trim() ?? "");
       return { query: input.value, results, ...snapshot() };
     },
-    reset: () => {
+    reset: async () => {
       select(null);
-      store.traceOnModel = false;
-      emit("trace");
-      setStep(stepCount());
-      setTab("model");
-      scene.fit();
+      setJourney(null);
+      store.notesOpen = false;
+      setLevel("containers");
+      fit(false);
+      await settled(200);
       return snapshot();
     },
     ui: () => uiSnapshot(),
     click: async (p) => {
       const el = byTestId(String(p.testid));
       if (!el) return { error: `no element with data-testid="${p.testid}"` };
-      el.click();
-      await settled(450);
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await settled(400);
       return { clicked: p.testid, ...snapshot() };
     },
     type: (p) => {
@@ -85,11 +106,12 @@ export function initBridge(scene: BrickScene, actions: Actions): void {
     },
     eval: async (p) => {
       // eslint-disable-next-line no-new-func
-      const fn = new Function("terrarium", "store", "scene", `return (async () => { ${String(p.js).includes("return") ? String(p.js) : `return (${String(p.js)});`} })();`);
-      const result = await fn(window.__terrarium, store, scene);
+      const fn = new Function("terrarium", "store", `return (async () => { ${String(p.js).includes("return") ? String(p.js) : `return (${String(p.js)});`} })();`);
+      const result = await fn(window.__terrarium, store);
       return { result: safeJson(result) };
     },
-    screenshot: () => ({ dataUrl: scene.snapshotDataUrl(), partial: true }),
+    screenshot: () => ({ error: "no canvas fallback: the native snapshot is the screenshot" }),
+    svg: () => ({ svg: exportSvg() }),
   };
 
   void on<BridgeRequest>("bridge:request", async (req) => {
@@ -108,12 +130,13 @@ export function initBridge(scene: BrickScene, actions: Actions): void {
 
   window.__terrarium = {
     store,
-    scene,
     actions,
     snapshot,
-    select: (id: number | null) => (id === null ? select(null) : jumpTo(id)),
+    select: (id: string | null) => (id === null ? select(null) : jumpTo(id)),
     ui: uiSnapshot,
-    version: "0.2.0",
+    svg: exportSvg,
+    containers: () => shownContainers().map((c) => c.id),
+    version: "0.3.0",
   };
 }
 
@@ -121,8 +144,8 @@ function byTestId(id: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(`[data-testid="${CSS.escape(id)}"]`);
 }
 
-function visible(el: HTMLElement): boolean {
-  if (el.hidden) return false;
+function visible(el: Element): boolean {
+  if ((el as HTMLElement).hidden) return false;
   const r = el.getBoundingClientRect();
   if (r.width === 0 && r.height === 0) return false;
   const cs = getComputedStyle(el);
@@ -137,23 +160,27 @@ export function uiSnapshot(): Record<string, unknown> {
   }
   const overlays: Record<string, boolean> = {};
   for (const o of document.querySelectorAll<HTMLElement>(".overlay")) overlays[o.dataset.testid ?? o.id] = visible(o);
-  const elements = [...document.querySelectorAll<HTMLElement>("[data-testid]")]
-    .filter((el) => visible(el) && !el.matches("[data-panel], .overlay, canvas"))
-    .slice(0, 400)
+  const elements = [...document.querySelectorAll<Element>("[data-testid]")]
+    .filter((el) => visible(el) && !el.matches("[data-panel], .overlay"))
+    .slice(0, 500)
     .map((el) => ({
-      testid: el.dataset.testid,
+      testid: (el as HTMLElement).dataset?.testid ?? el.getAttribute("data-testid"),
       tag: el.tagName.toLowerCase(),
       text: (el instanceof HTMLInputElement ? el.value : el.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 120),
-      active: el.classList.contains("is-active") || el.classList.contains("is-selected") || undefined,
+      active: el.classList.contains("is-active") || el.classList.contains("is-selected") || el.classList.contains("is-current") || undefined,
+      state: (el as HTMLElement).dataset?.state || undefined,
       disabled: (el as HTMLButtonElement).disabled || undefined,
     }));
   const toasts = [...document.querySelectorAll<HTMLElement>(".toast")].map((t) => t.textContent ?? "");
   const card = document.querySelector<HTMLElement>("#card");
+  const diagram = document.getElementById("diagram");
   return {
     ...snapshot(),
     panels,
     overlays,
-    card: card && !card.hidden ? { title: card.querySelector("[data-testid=card-title]")?.textContent, path: card.querySelector("[data-testid=card-path]")?.textContent, chips: [...card.querySelectorAll(".chip")].map((c) => c.textContent) } : null,
+    card: card && !card.hidden ? { title: card.querySelector("[data-testid=card-title]")?.textContent?.trim(), chips: [...card.querySelectorAll(".chip")].map((c) => c.textContent) } : null,
+    diagram: diagram ? { nodes: [...diagram.querySelectorAll<SVGGElement>("g.node")].map((g) => ({ id: g.dataset.id, title: g.querySelector(".c4-title")?.textContent, state: g.dataset.state || undefined, dim: g.classList.contains("is-dim") || undefined })), edges: [...diagram.querySelectorAll<SVGGElement>("g.edge")].map((g) => ({ from: g.dataset.from, to: g.dataset.to, source: [...g.classList].find((c) => c.startsWith("is-") && ["is-code", "is-survey", "is-claimed"].includes(c))?.slice(3), journey: g.classList.contains("is-journey") || undefined })) } : null,
+    notes: store.notesOpen ? store.discovery.notes.slice(-30).map((n) => n.text) : undefined,
     toasts,
     elements,
     window: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio },
@@ -164,7 +191,7 @@ function safeJson(v: unknown): unknown {
   try { return JSON.parse(JSON.stringify(v ?? null)); } catch { return String(v); }
 }
 
-/** Two frames plus a short wait: long enough for a render and a camera ease or drop-in. */
+/** Two frames plus a short wait: long enough for a render and a level ease. */
 async function settled(ms: number): Promise<void> {
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
   await sleep(ms);
@@ -178,11 +205,12 @@ declare global {
   interface Window {
     __terrarium: {
       store: typeof store;
-      scene: BrickScene;
       actions: Actions;
       snapshot: typeof snapshot;
-      select: (id: number | null) => unknown;
+      select: (id: string | null) => unknown;
       ui: typeof uiSnapshot;
+      svg: () => string;
+      containers: () => string[];
       version: string;
     };
   }

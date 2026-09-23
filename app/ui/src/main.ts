@@ -1,81 +1,14 @@
-// Bootstrap: brick scene, panels, manual, backend events, keyboard, agent hooks.
+// Bootstrap: the diagram, the panels, backend events, keyboard, agent hooks.
 
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, inTauri, log, on } from "./tauri";
-import { store, subscribe, emit, select, setBuild, setHover, setStep, setTab, stepCount, snapshot, traceBuildings, buildingForNode, buildingAt, type Tab } from "./store";
-import { BrickScene, type Hit } from "./bricks";
+import { store, emit, select, setAtlas, setLevel, setJourney, setJourneyStep, zoomInto, zoomOut, snapshot, elementById } from "./store";
 import { initPanels, refreshRecent, setShelfTab, toast, toggleHelp, type Actions } from "./panels";
+import { initAtlas, goLevel } from "./atlas";
+import { initDiscovery } from "./discovery";
 import { initBridge } from "./bridge";
-import { initTraces, loadTraces, stepTrace } from "./traces";
-import { initManual, stop, togglePlay } from "./manual";
-import { initParts } from "./parts";
-import { initDesign } from "./design";
 import type { ScanDone } from "./types";
-
-const scene = new BrickScene(document.getElementById("scene")!);
-
-// ---- the scene follows the store ----------------------------------------------
-
-let lastStep = -1;
-subscribe("build", () => {
-  const b = store.build!;
-  scene.setModel(b.model, b.design.steps.length);
-  lastStep = store.step;
-  applyHighlight();
-  applySelection();
-});
-subscribe("step", () => {
-  // One step forward (playing or pressing next) drops the new pieces in; jumps just cut.
-  const animate = store.step === lastStep + 1;
-  scene.setStep(store.step - 1, { animate });
-  lastStep = store.step;
-});
-subscribe("selection", applySelection);
-subscribe("trace", applyHighlight);
-let lastTab = store.tab;
-subscribe("tab", () => {
-  document.body.dataset.tab = store.tab;
-  // Model and Manual give the scene different room; frame it again once the box has resized.
-  const room = (t: Tab) => (t === "manual" ? "narrow" : t === "model" ? "wide" : "none");
-  if (room(store.tab) !== room(lastTab) && room(store.tab) !== "none") requestAnimationFrame(() => requestAnimationFrame(() => scene.fit()));
-  lastTab = store.tab;
-  document.querySelectorAll<HTMLElement>("[data-stage-tab]").forEach((b) => b.classList.toggle("is-active", b.dataset.stageTab === store.tab));
-  log("info", "tab", { tab: store.tab });
-  emit("ui");
-});
-subscribe("view", () => {
-  document.querySelectorAll<HTMLElement>("[data-view]").forEach((b) => b.classList.toggle("is-active", b.dataset.view === store.view));
-  document.getElementById("spin-btn")!.classList.toggle("is-active", store.spin);
-});
-
-function applySelection(): void {
-  const id = store.selection;
-  if (id === null || !store.build) { scene.select(null); return; }
-  const building = buildingForNode(id);
-  if (building === null) { scene.select(null); return; }
-  const brick = store.brickOf.get(id) ?? store.build.model.bricks.findIndex((br) => br.building === building);
-  scene.select({ building, brick });
-}
-
-function applyHighlight(): void {
-  scene.highlight(store.trace && store.traceOnModel ? traceBuildings() : null);
-}
-
-scene.onPick((hit: Hit | null) => {
-  if (!hit || !store.build) { select(null); return; }
-  const b = store.build.model;
-  const brick = b.bricks[hit.brick];
-  const building = b.buildings[hit.building];
-  // In the manual, a brick is a way back to the step that added it.
-  if (store.tab === "manual") { stop(); setStep(building.step + 1); }
-  select(brick ? brick.nodes[0] : building.id);
-});
-scene.onHover((hit) => {
-  const b = store.build?.model;
-  setHover(hit && b ? b.bricks[hit.brick]?.nodes[0] ?? b.buildings[hit.building].id : null);
-  document.getElementById("scene")!.classList.toggle("is-pointing", !!hit);
-});
 
 // ---- actions ---------------------------------------------------------------------
 
@@ -90,41 +23,30 @@ const actions: Actions = {
     if (!path) return;
     await scan(path, false);
   },
-  focusBuilding(index) {
-    const b = buildingAt(index);
-    if (b) scene.focusDistrict(b.district);
-  },
-  focusDistrict(index) {
-    scene.focusDistrict(index);
-  },
-  showTraceOnModel() {
-    select(null);
-    store.traceOnModel = true;
-    setStep(stepCount());
-    setTab("model");
-    emit("trace");
+  async copyDsl() {
+    try {
+      const dsl = await api.atlasDsl();
+      await navigator.clipboard.writeText(dsl);
+      toast("Copied the atlas as Structurizr DSL", "ok");
+    } catch (e) { toast(`Cannot copy: ${String(e)}`, "error"); }
   },
 };
 
-async function loadBuild(firstForRepo: boolean): Promise<void> {
+async function loadAtlas(firstForRepo: boolean): Promise<void> {
   const t0 = performance.now();
   try {
-    setBuild(await api.getBuild());
+    const v = await api.getAtlas();
+    if (firstForRepo) { store.level = "containers"; store.focus = null; store.selection = null; store.relSelection = null; store.journey = null; store.notesOpen = false; }
+    setAtlas(v.atlas, v.stale ?? null);
   } catch (e) {
-    toast(`Cannot build the model: ${String(e)}`, "error");
-    log("error", "get_build failed", { error: String(e) });
+    toast(`Cannot load the atlas: ${String(e)}`, "error");
+    log("error", "get_atlas failed", { error: String(e) });
     return;
   }
-  if (firstForRepo) {
-    select(null);
-    setTab("model");
-    scene.fit();
-  }
-  await loadTraces(firstForRepo);
   emit("repo");
   emit("ui");
-  const b = store.build!;
-  log("info", "build loaded", { source: b.design.source, steps: b.check.steps, pieces: b.check.pieces, weak: b.check.weak.length, ms: Math.round(performance.now() - t0) });
+  const a = store.atlas!;
+  log("info", "atlas loaded", { source: a.source, containers: a.containers.length, relationships: a.relationships.length, backed: a.report.backed, claimed: a.report.claimed, ms: Math.round(performance.now() - t0) });
 }
 
 let scanStartedHere = false;
@@ -140,9 +62,9 @@ async function scan(path: string, fresh: boolean): Promise<void> {
     store.scanning = null;
     store.repo = done.root;
     store.stats = done.stats;
-    await loadBuild(true);
-    const b = store.build;
-    toast(done.from_cache ? `Opened ${done.stats.files} files from cache. Press R to rescan.` : `Built ${done.stats.files} files in ${b?.check.steps ?? 0} steps`, "ok");
+    await loadAtlas(true);
+    const a = store.atlas;
+    toast(done.from_cache ? `Opened ${done.stats.files} files from cache. Press R to rescan.` : `Surveyed ${done.stats.files} files into ${a?.containers.filter((c) => !c.hidden).length ?? 0} containers`, "ok");
     void refreshRecent();
   } catch (e) {
     store.scanning = null;
@@ -154,50 +76,40 @@ async function scan(path: string, fresh: boolean): Promise<void> {
   }
 }
 
-// ---- controls ----------------------------------------------------------------------
-
-document.querySelectorAll<HTMLButtonElement>("[data-stage-tab]").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.stageTab as Tab)));
-document.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view as typeof store.view)));
-document.getElementById("spin-btn")!.addEventListener("click", () => setSpin(!store.spin));
-document.getElementById("fit-btn")!.addEventListener("click", () => scene.fit());
-
-function setView(v: typeof store.view): void {
-  store.view = v;
-  scene.setView(v);
-  emit("view");
-}
-
-function setSpin(on: boolean): void {
-  store.spin = on;
-  scene.setSpin(on);
-  emit("view");
-}
+// ---- keyboard ----------------------------------------------------------------------
 
 window.addEventListener("keydown", (e) => {
   const inInput = (e.target as HTMLElement)?.tagName === "INPUT";
   if (e.metaKey && e.key.toLowerCase() === "o") { e.preventDefault(); void actions.openRepo(); return; }
   if (e.metaKey && e.key.toLowerCase() === "k") { e.preventDefault(); (document.getElementById("search") as HTMLInputElement).focus(); return; }
   if (inInput || e.metaKey || e.ctrlKey) return;
-  const tabs: Record<string, Tab> = { m: "model", n: "manual", p: "parts", t: "traces", d: "design" };
-  const k = e.key.toLowerCase();
-  if (tabs[k]) { setTab(tabs[k]); return; }
   switch (e.key) {
     case "/": e.preventDefault(); (document.getElementById("search") as HTMLInputElement).focus(); break;
-    case " ": e.preventDefault(); togglePlay(); break;
-    case "ArrowRight": stop(); setStep(store.step + 1); break;
-    case "ArrowLeft": stop(); setStep(store.step - 1); break;
-    case "Home": stop(); setStep(0); break;
-    case "End": stop(); setStep(stepCount()); break;
-    case "1": setView("iso"); break;
-    case "2": setView("front"); break;
-    case "3": setView("top"); break;
-    case "s": case "S": setSpin(!store.spin); break;
-    case "f": case "F": scene.fit(); break;
-    case "j": case "J": stepTrace(1); break;
-    case "k": case "K": stepTrace(-1); break;
+    case "1": goLevel("context"); break;
+    case "2": goLevel("containers"); break;
+    case "3": goLevel("components"); break;
+    case "4": goLevel("code"); break;
+    case "Enter": if (store.selection) zoomInto(store.selection); break;
+    case "Backspace": zoomOut(); break;
+    case "ArrowRight": if (store.journey) setJourneyStep(store.journeyStep + 1); break;
+    case "ArrowLeft": if (store.journey) setJourneyStep(store.journeyStep - 1); break;
+    case "j": case "J": {
+      const js = store.atlas?.journeys ?? [];
+      if (!js.length) break;
+      const i = store.journey ? js.findIndex((x) => x.id === store.journey!.id) : -1;
+      setJourney(js[(i + 1) % js.length]);
+      setShelfTab("journeys");
+      break;
+    }
+    case "f": case "F": document.getElementById("fit-btn")?.click(); break;
     case "r": case "R": if (store.repo) void scan(store.repo, true); break;
     case "?": toggleHelp(); break;
-    case "Escape": if (store.selection !== null) select(null); else toggleHelp(false); break;
+    case "Escape":
+      if (store.selection !== null || store.relSelection !== null) select(null);
+      else if (store.journey) setJourney(null);
+      else if (store.notesOpen) { store.notesOpen = false; emit("discovery"); emit("ui"); }
+      else toggleHelp(false);
+      break;
     case "[": store.shelfOpen = !store.shelfOpen; emit("ui"); break;
   }
 });
@@ -206,13 +118,13 @@ window.addEventListener("keydown", (e) => {
 
 void on<{ path: string }>("scan:started", ({ path }) => { store.scanning = path; emit("ui"); });
 void on<{ path: string; error: string }>("scan:error", ({ error }) => { store.scanning = null; emit("ui"); toast(`Scan failed: ${error}`, "error", 6000); });
-// A scan started from the bridge (not from this UI) still needs the build loaded here.
+// A scan started from the bridge (not from this UI) still needs the atlas loaded here.
 void on<ScanDone>("scan:done", (done) => {
   if (scanStartedHere) return; // scan() loads it itself
   store.scanning = null;
   store.repo = done.root;
   store.stats = done.stats;
-  void loadBuild(true);
+  void loadAtlas(true);
 });
 
 if (inTauri) {
@@ -221,7 +133,7 @@ if (inTauri) {
   });
 }
 
-// ---- reporting (keeps /state and /metrics fresh even without a round trip) ---------
+// ---- reporting (keeps /state fresh even without a round trip) ----------------------
 
 let lastReport = "";
 setInterval(() => {
@@ -234,19 +146,28 @@ setInterval(() => {
     void api.reportUi({ ...rest, ts }).catch(() => {});
   }
 }, 500);
+let frames = 0;
+let lastFrames = performance.now();
+const countFrame = () => { frames++; requestAnimationFrame(countFrame); };
+requestAnimationFrame(countFrame);
 setInterval(() => {
-  if (inTauri) void api.reportMetrics({ ...scene.stats(), ts: new Date().toISOString() }).catch(() => {});
+  if (!inTauri) return;
+  const now = performance.now();
+  const fps = (frames * 1000) / (now - lastFrames);
+  frames = 0;
+  lastFrames = now;
+  void api.reportMetrics({ fps: Math.round(fps), frame_ms_p50: 0, frame_ms_p95: 0, elements_drawn: document.querySelectorAll("#diagram g.node, #diagram g.edge").length, renderer: "svg", ts: new Date().toISOString() }).catch(() => {});
 }, 1000);
 
 // ---- boot --------------------------------------------------------------------------
 
 initPanels(actions);
-initTraces({ showOnModel: () => actions.showTraceOnModel() });
-initManual();
-initParts();
-initDesign();
-initBridge(scene, actions);
-setShelfTab("sub-builds");
+initAtlas();
+initDiscovery();
+initBridge(actions);
+setShelfTab("map");
+void elementById;
+void setLevel;
 
 (async () => {
   if (!inTauri) { log("warn", "running outside Tauri: open the app with `terrarium app launch`"); return; }
@@ -260,5 +181,5 @@ setShelfTab("sub-builds");
     const initial = await api.initialRepo();
     if (initial) await scan(initial, false);
   } catch (e) { log("warn", `initial repo failed: ${String(e)}`); }
-  log("info", "ui ready", { renderer: scene.rendererName, dpr: window.devicePixelRatio });
+  log("info", "ui ready", { dpr: window.devicePixelRatio });
 })();

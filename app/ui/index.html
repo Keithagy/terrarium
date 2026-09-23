@@ -6,76 +6,81 @@
     <title>Terrarium</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
-  <body data-tab="model">
+  <body>
     <div id="titlebar" data-tauri-drag-region></div>
-    <div id="scene" data-testid="scene"></div>
 
     <header id="header" data-testid="header" data-panel="header" data-tauri-drag-region>
       <button id="repo-name" class="header-title" data-testid="repo-name" title="Open another repository">No repository</button>
       <div id="chips" class="header-chips" data-testid="chips"></div>
       <div class="header-actions">
-        <button id="design-btn" class="primary" data-testid="design-claude" title="One Claude agent per sub-build reads the code and writes the manual; the engine checks every joint">Design with Claude</button>
+        <button id="notes-btn" class="ghost" data-testid="notes" title="What the agents found, as they found it" hidden>Field notes</button>
+        <button id="dsl-btn" class="ghost" data-testid="copy-dsl" title="Copy the atlas as Structurizr DSL">Copy DSL</button>
+        <button id="discover-btn" class="primary" data-testid="discover-claude" title="A surveyor, one agent per container and per journey, and an editor read the code and name every part; the engine checks every relationship">Discover with Claude</button>
         <button id="help-btn" class="ghost is-round" data-testid="help" title="Keyboard shortcuts">?</button>
       </div>
     </header>
 
     <aside id="shelf" data-testid="shelf" data-panel="shelf">
       <div class="shelf-search">
-        <input id="search" data-testid="search" type="search" placeholder="Find a file or symbol" autocomplete="off" spellcheck="false" />
+        <input id="search" data-testid="search" type="search" placeholder="Find a container, component, file or symbol" autocomplete="off" spellcheck="false" />
         <ul id="search-results" data-testid="search-results" hidden></ul>
       </div>
       <nav class="tabs" role="tablist">
-        <button class="tab is-active" data-tab="sub-builds" data-testid="tab-sub-builds" role="tab">Sub-builds</button>
-        <button class="tab" data-tab="traces" data-testid="tab-traces" role="tab">Traces</button>
-        <button class="tab" data-tab="endpoints" data-testid="tab-endpoints" role="tab">Endpoints</button>
+        <button class="tab is-active" data-tab="map" data-testid="tab-map" role="tab">Map</button>
+        <button class="tab" data-tab="journeys" data-testid="tab-journeys" role="tab">Journeys</button>
+        <button class="tab" data-tab="guide" data-testid="tab-guide" role="tab">Guide</button>
       </nav>
-      <section class="tab-panel is-active" data-tab-panel="sub-builds" data-testid="sub-builds"></section>
-      <section class="tab-panel" data-tab-panel="traces" data-testid="traces"></section>
-      <section class="tab-panel" data-tab-panel="endpoints" data-testid="endpoints"></section>
-      <footer class="legend" data-testid="legend"></footer>
+      <section class="tab-panel is-active" data-tab-panel="map" data-testid="map"></section>
+      <section class="tab-panel" data-tab-panel="journeys" data-testid="journeys"></section>
+      <section class="tab-panel" data-tab-panel="guide" data-testid="guide"></section>
+      <footer class="legend" data-testid="legend">
+        <span class="legend-item"><span class="key-line is-code"></span>backed by code</span>
+        <span class="legend-item"><span class="key-line is-survey"></span>from the survey</span>
+        <span class="legend-item"><span class="key-line is-claimed"></span>claimed, not in code</span>
+        <span class="legend-item"><span class="key-line is-journey"></span>journey</span>
+      </footer>
     </aside>
 
-    <nav id="stage-tabs" class="segmented stage-tabs" data-testid="stage-tabs" role="tablist" aria-label="View">
-      <button data-stage-tab="model" data-testid="stage-model" class="is-active" title="The brick model (M)">Model</button>
-      <button data-stage-tab="manual" data-testid="stage-manual" title="Step-by-step manual (N)">Manual</button>
-      <button data-stage-tab="parts" data-testid="stage-parts" title="Parts inventory (P)">Parts</button>
-      <button data-stage-tab="traces" data-testid="stage-traces" title="Requests across languages (T)">Traces</button>
-      <button data-stage-tab="design" data-testid="stage-design" title="Who designed it and the joint check (D)">Design</button>
-    </nav>
-
-    <div id="view-controls" class="segmented view-controls" data-testid="view-controls" role="group" aria-label="Camera">
-      <button data-view="iso" data-testid="view-iso" class="is-active" title="Isometric (1)">Iso</button>
-      <button data-view="front" data-testid="view-front" title="Front (2)">Front</button>
-      <button data-view="top" data-testid="view-top" title="Top (3)">Top</button>
-      <button id="spin-btn" data-testid="view-spin" title="Turntable (S)">Spin</button>
-      <button id="fit-btn" data-testid="view-fit" title="Fit (F)">Fit</button>
-    </div>
-
-    <main id="page" data-testid="manual-page" data-panel="manual" hidden></main>
-    <main id="parts-view" class="stage-panel" data-testid="parts-view" data-panel="parts" hidden></main>
-    <main id="trace-view" class="stage-panel" data-testid="trace-view" data-panel="trace" hidden></main>
-    <main id="design-view" class="stage-panel" data-testid="design-view" data-panel="design" hidden></main>
+    <main id="stage" data-testid="stage" data-panel="stage" data-level="containers">
+      <div id="crumbs-bar">
+        <nav id="crumbs" data-testid="crumbs" aria-label="Where you are"></nav>
+        <div class="crumbs-right">
+          <div class="segmented levels" role="group" aria-label="Level">
+            <button data-level="context" data-testid="level-context" title="Who uses the system and what it talks to (1)">Context</button>
+            <button data-level="containers" data-testid="level-containers" class="is-active" title="What runs (2)">Containers</button>
+            <button data-level="components" data-testid="level-components" title="Inside one container (3)">Components</button>
+            <button data-level="code" data-testid="level-code" title="One component's files (4)">Code</button>
+          </div>
+          <button id="fit-btn" class="ghost" data-testid="fit" title="Fit the diagram (F)">Fit</button>
+        </div>
+      </div>
+      <span id="bridge" class="bench-pill is-quiet" data-testid="bridge" title="Local agent bridge">bridge starting</span>
+      <svg id="diagram" data-testid="diagram" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" preserveAspectRatio="xMidYMid meet"></svg>
+      <section id="code-view" data-testid="code-view" hidden></section>
+    </main>
 
     <aside id="card" data-testid="card" data-panel="card" hidden></aside>
 
-    <footer id="timeline" data-testid="timeline" data-panel="timeline">
-      <div class="transport">
-        <button id="tl-first" class="ghost is-round" data-testid="timeline-first" title="Empty baseplate (Home)">⏮</button>
-        <button id="tl-play" class="play" data-testid="timeline-play" title="Play the build (Space)">▶</button>
-        <button id="tl-last" class="ghost is-round" data-testid="timeline-last" title="Finished model (End)">⏭</button>
+    <aside id="notes" data-testid="notes-panel" data-panel="notes" hidden>
+      <button id="notes-close" class="card-close" data-testid="notes-close" title="Close">×</button>
+      <div id="notes-head"></div>
+      <div id="notes-stages" class="stages" data-testid="stages"></div>
+      <ul id="notes-agents" class="agents" data-testid="agents"></ul>
+      <ul id="notes-log" class="notes-log" data-testid="notes-log"></ul>
+      <div id="notes-foot" class="notes-foot"></div>
+    </aside>
+
+    <footer id="journey-bar" data-testid="journey-bar" data-panel="journey" hidden>
+      <div class="jb-transport">
+        <button id="jb-prev" class="ghost is-round" data-testid="journey-prev" title="Previous step (←)">‹</button>
+        <button id="jb-next" class="play" data-testid="journey-next" title="Next step (→)">›</button>
       </div>
-      <div class="segmented speeds" role="group" aria-label="Speed">
-        <button data-speed="0.5" data-testid="speed-0.5">0.5×</button>
-        <button data-speed="1" data-testid="speed-1" class="is-active">1×</button>
-        <button data-speed="2" data-testid="speed-2">2×</button>
-        <button data-speed="4" data-testid="speed-4">4×</button>
+      <div class="jb-body">
+        <div class="jb-top"><b id="jb-title" data-testid="journey-title"></b><span id="jb-count" class="meta" data-testid="journey-count"></span><button id="jb-all" class="link-quiet" data-testid="journey-all">Show the whole path</button></div>
+        <div id="jb-caption" class="jb-caption" data-testid="journey-caption"></div>
+        <input id="jb-range" data-testid="journey-range" type="range" min="0" max="0" step="1" value="0" aria-label="Journey step" />
       </div>
-      <div class="scrub">
-        <div class="scrub-label"><b id="tl-title" data-testid="timeline-title">No build yet</b><span id="tl-meta" data-testid="timeline-meta"></span></div>
-        <input id="tl-range" data-testid="timeline-range" type="range" min="0" max="0" step="1" value="0" aria-label="Build step" />
-      </div>
-      <button id="tl-status" class="bench-pill is-quiet" data-testid="timeline-status" title="Where the manual is">Finished</button>
-      <span id="bridge" class="bench-pill is-quiet" data-testid="bridge" title="Local agent bridge">bridge starting</span>
+      <button id="jb-close" class="ghost is-round" data-testid="journey-close" title="Stop following this journey (Esc)">×</button>
     </footer>
 
     <div id="empty" class="overlay" data-testid="empty">
@@ -89,17 +94,18 @@
           </defs>
           <rect x="44" y="12" width="72" height="14" rx="5" fill="#C99A3C"/>
           <path d="M30 40 Q30 24 46 24 H114 Q130 24 130 40 V170 Q130 190 110 190 H50 Q30 190 30 170 Z" fill="url(#glass)" stroke="#D9E4DA" stroke-opacity=".25"/>
-          <rect x="40" y="168" width="80" height="12" rx="2" fill="#4E7F86"/>
-          <rect x="46" y="140" width="22" height="28" rx="2" fill="#6FB3E0"/>
-          <rect x="72" y="118" width="22" height="50" rx="2" fill="#E0904A"/>
-          <rect x="98" y="148" width="16" height="20" rx="2" fill="#8FBF6A"/>
-          <circle cx="83" cy="112" r="4" fill="#F2B950"/>
-          <path d="M57 140 Q70 100 83 118" stroke="#F2B950" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+          <rect x="46" y="64" width="34" height="22" rx="5" fill="none" stroke="#6FB3E0" stroke-width="2"/>
+          <rect x="88" y="104" width="34" height="22" rx="5" fill="none" stroke="#8FBF6A" stroke-width="2"/>
+          <rect x="46" y="144" width="34" height="22" rx="5" fill="none" stroke="#E0904A" stroke-width="2"/>
+          <path d="M63 86 V104 Q63 115 78 115 H88" stroke="#F2B950" stroke-width="2" fill="none" stroke-linecap="round"/>
+          <path d="M105 126 V132 Q105 155 80 155" stroke="#F2B950" stroke-width="2" fill="none" stroke-linecap="round"/>
+          <circle cx="88" cy="115" r="2.6" fill="#F2B950"/>
+          <circle cx="80" cy="155" r="2.6" fill="#F2B950"/>
           <path d="M40 40 V160" stroke="#D9E4DA" stroke-opacity=".12" stroke-width="3" stroke-linecap="round"/>
         </svg>
       </div>
-      <h1>A quiet place to watch a codebase</h1>
-      <p>Open a repository and Terrarium builds it as a brick model: packages are districts, files are buildings, and a manual adds them in the order you can read them.</p>
+      <h1>See what a codebase does before you read it</h1>
+      <p>Open a repository and Terrarium draws it as C4 diagrams: who uses it, what runs, what each part is for, and how a request travels through. Every arrow is backed by the code, and Claude agents write the words.</p>
       <div class="empty-actions">
         <button id="open-btn" class="primary" data-testid="open-repo">Open a repository</button>
         <span class="hint">or drop a folder here</span>
@@ -109,7 +115,7 @@
 
     <div id="scanning" class="overlay" data-testid="scanning" hidden>
       <div class="spinner"></div>
-      <h2>Sorting the bricks</h2>
+      <h2>Surveying the repository</h2>
       <p id="scanning-path" class="mono"></p>
     </div>
 
@@ -119,15 +125,16 @@
         <dl class="keys">
           <dt>⌘O</dt><dd>Open a repository</dd>
           <dt>/</dt><dd>Search</dd>
-          <dt>M N P T D</dt><dd>Model, manual, parts, traces, design</dd>
-          <dt>Space</dt><dd>Play or pause the build</dd>
-          <dt>← →</dt><dd>Previous, next step</dd>
-          <dt>Home End</dt><dd>Empty baseplate, finished model</dd>
-          <dt>1 2 3</dt><dd>Iso, front, top</dd>
-          <dt>S F</dt><dd>Spin, fit</dd>
-          <dt>J K</dt><dd>Next, previous trace</dd>
-          <dt>Esc</dt><dd>Clear selection</dd>
-          <dt>Drag · scroll · pinch</dt><dd>Orbit · pan · zoom</dd>
+          <dt>1 2 3 4</dt><dd>Context, containers, components, code</dd>
+          <dt>Enter</dt><dd>Open the selected element</dd>
+          <dt>Backspace</dt><dd>Up one level</dd>
+          <dt>J</dt><dd>Next journey</dd>
+          <dt>← →</dt><dd>Previous, next journey step</dd>
+          <dt>F</dt><dd>Fit the diagram</dd>
+          <dt>R</dt><dd>Rescan</dd>
+          <dt>Esc</dt><dd>Clear selection, stop the journey</dd>
+          <dt>[</dt><dd>Hide the shelf</dd>
+          <dt>Drag · scroll · ⌘scroll</dt><dd>Pan · pan · zoom</dd>
         </dl>
         <p class="hint">Agents: <code>terrarium app state</code>, <code>terrarium app screenshot</code>, or GET <code id="help-bridge">http://127.0.0.1</code></p>
         <button class="primary" data-testid="help-close">Close</button>

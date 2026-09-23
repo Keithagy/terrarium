@@ -1,47 +1,67 @@
-// Single source of truth for the UI. Panels and the brick scene subscribe to it;
+// Single source of truth for the UI. The diagram and the panels subscribe to it;
 // the bridge reads it to answer `/state`.
 
-import type { Build, Building, Endpoint, Stats, Trace } from "./types";
+import type { Atlas, Component, Container, Journey, Relationship, Stats } from "./types";
 
-export type Tab = "model" | "manual" | "parts" | "traces" | "design";
-export type ShelfTab = "sub-builds" | "traces" | "endpoints";
-export type View = "iso" | "front" | "top";
+/** The C4 levels. `code` is one component's files. */
+export type Level = "context" | "containers" | "components" | "code";
+export type ShelfTab = "map" | "journeys" | "guide";
 
-export interface DesignRunState {
+export interface AgentState {
+  key: string;
+  role: string;
+  target: string | null;
+  name: string;
+  done: boolean;
+  ok: boolean | null;
+  error: string | null;
+  cost_usd: number;
+  secs: number;
+  reads: number;
+  current: string | null;
+}
+
+export interface Note {
+  t: number;
+  kind: "stage" | "agent" | "found" | "check" | "error";
+  text: string;
+}
+
+export interface DiscoveryState {
   running: boolean;
   model: string;
-  agents: number;
+  stage: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+  total: number;
   done: number;
   cost_usd: number;
-  log: { role: string; ok: boolean; cost_usd: number }[];
+  agents: AgentState[];
+  notes: Note[];
+  /** Files agents have opened, by container id. */
+  reads: Map<string, string[]>;
   error: string | null;
 }
 
 export interface Store {
   repo: string | null;
   stats: Stats | null;
-  build: Build | null;
-  /** Manual steps shown: 0 is the empty baseplate, `steps` is the finished model. */
-  step: number;
-  playing: boolean;
-  speed: number;
-  tab: Tab;
+  atlas: Atlas | null;
+  stale: string | null;
+  level: Level;
+  /** Container id at `components`, component id at `code`. */
+  focus: string | null;
+  /** Selected element id (container, component, person, external), or `null`. */
+  selection: string | null;
+  /** Selected relationship, as `from>to`, or `null`. */
+  relSelection: string | null;
+  hover: string | null;
+  journey: Journey | null;
+  /** 1-based step of the playing journey; 0 shows the whole path. */
+  journeyStep: number;
   shelfTab: ShelfTab;
-  view: View;
-  spin: boolean;
-  /** Selected graph node (a file or a symbol). */
-  selection: number | null;
-  hover: number | null;
-  /** Building index by file node id, and brick index by symbol node id. */
-  buildingOf: Map<number, number>;
-  brickOf: Map<number, number>;
-  traces: Trace[];
-  endpoints: Endpoint[];
-  /** The trace on the Traces tab. */
-  trace: Trace | null;
-  /** Light the trace up on the model, dimming everything else. */
-  traceOnModel: boolean;
-  design: DesignRunState;
+  discovery: DiscoveryState;
+  notesOpen: boolean;
   search: string;
   shelfOpen: boolean;
   bridgePort: number | null;
@@ -49,26 +69,25 @@ export interface Store {
   graphLoaded: boolean;
 }
 
+export function freshDiscovery(): DiscoveryState {
+  return { running: false, model: "", stage: null, startedAt: 0, finishedAt: null, total: 0, done: 0, cost_usd: 0, agents: [], notes: [], reads: new Map(), error: null };
+}
+
 export const store: Store = {
   repo: null,
   stats: null,
-  build: null,
-  step: 0,
-  playing: false,
-  speed: 1,
-  tab: "model",
-  shelfTab: "sub-builds",
-  view: "iso",
-  spin: false,
+  atlas: null,
+  stale: null,
+  level: "containers",
+  focus: null,
   selection: null,
+  relSelection: null,
   hover: null,
-  buildingOf: new Map(),
-  brickOf: new Map(),
-  traces: [],
-  endpoints: [],
-  trace: null,
-  traceOnModel: false,
-  design: { running: false, model: "", agents: 0, done: 0, cost_usd: 0, log: [], error: null },
+  journey: null,
+  journeyStep: 0,
+  shelfTab: "map",
+  discovery: freshDiscovery(),
+  notesOpen: false,
   search: "",
   shelfOpen: true,
   bridgePort: null,
@@ -76,7 +95,7 @@ export const store: Store = {
   graphLoaded: false,
 };
 
-type Topic = "build" | "step" | "selection" | "hover" | "tab" | "view" | "trace" | "design" | "repo" | "ui";
+type Topic = "atlas" | "level" | "selection" | "hover" | "journey" | "discovery" | "repo" | "ui";
 const listeners = new Map<Topic, Set<() => void>>();
 
 export function subscribe(topic: Topic, fn: () => void): () => void {
@@ -89,101 +108,155 @@ export function emit(topic: Topic): void {
   listeners.get(topic)?.forEach((fn) => fn());
 }
 
-export function stepCount(): number {
-  return store.build?.design.steps.length ?? 0;
-}
-
-export function setBuild(b: Build): void {
-  store.build = b;
-  store.buildingOf = new Map(b.model.buildings.map((x, i) => [x.id, i]));
-  store.brickOf = new Map();
-  b.model.bricks.forEach((br, i) => br.nodes.forEach((n) => store.brickOf.set(n, i)));
-  store.step = b.design.steps.length;
-  store.playing = false;
+export function setAtlas(a: Atlas, stale: string | null): void {
+  store.atlas = a;
+  store.stale = stale;
   store.graphLoaded = true;
-  if (store.selection !== null && buildingForNode(store.selection) === null) store.selection = null;
-  emit("build");
-  emit("step");
+  if (store.focus && !elementById(store.focus)) { store.focus = null; store.level = "containers"; }
+  if (store.selection && !elementById(store.selection)) store.selection = null;
+  if (store.journey) store.journey = a.journeys.find((j) => j.id === store.journey!.id) ?? null;
+  emit("atlas");
+  emit("level");
   emit("selection");
+  emit("journey");
 }
 
-/** The building a node lives in: the file itself, or the file of a symbol. */
-export function buildingForNode(id: number): number | null {
-  const direct = store.buildingOf.get(id);
-  if (direct !== undefined) return direct;
-  const brick = store.brickOf.get(id);
-  return brick === undefined ? null : store.build!.model.bricks[brick].building;
+export function shownContainers(): Container[] {
+  return store.atlas?.containers.filter((c) => !c.hidden) ?? [];
 }
 
-export function buildingAt(i: number | null): Building | null {
-  return i === null ? null : store.build?.model.buildings[i] ?? null;
+export function containerOf(id: string): Container | null {
+  const cid = id.includes("/") ? id.slice(0, id.indexOf("/")) : id;
+  return store.atlas?.containers.find((c) => c.id === cid) ?? null;
 }
 
-export function setStep(n: number): void {
-  const clamped = Math.max(0, Math.min(stepCount(), Math.round(n)));
-  if (clamped === store.step) return;
-  store.step = clamped;
-  emit("step");
+export type Element =
+  | { kind: "system" }
+  | { kind: "person"; person: import("./types").Person }
+  | { kind: "external"; external: import("./types").External }
+  | { kind: "container"; container: Container }
+  | { kind: "component"; container: Container; component: Component };
+
+export function elementById(id: string): Element | null {
+  const a = store.atlas;
+  if (!a) return null;
+  if (id === "s") return { kind: "system" };
+  const p = a.people.find((x) => x.id === id);
+  if (p) return { kind: "person", person: p };
+  const x = a.externals.find((x) => x.id === id);
+  if (x) return { kind: "external", external: x };
+  for (const c of a.containers) {
+    if (c.id === id) return { kind: "container", container: c };
+    const k = c.components.find((k) => k.id === id);
+    if (k) return { kind: "component", container: c, component: k };
+  }
+  return null;
 }
 
-export function setTab(t: Tab): void {
-  if (store.tab === t) return;
-  store.tab = t;
-  emit("tab");
+export function elementName(id: string): string {
+  const e = elementById(id);
+  if (!e) return store.atlas?.journeys.find((j) => j.id === id)?.name ?? id;
+  switch (e.kind) {
+    case "system": return store.atlas!.system.name;
+    case "person": return e.person.name;
+    case "external": return e.external.name;
+    case "container": return e.container.name;
+    case "component": return e.component.name;
+  }
 }
 
-export function select(id: number | null): void {
-  if (store.selection === id) return;
+/** Component id that holds a file path, if any. */
+export function componentOfFile(path: string): string | null {
+  const file = path.split("#")[0];
+  for (const c of store.atlas?.containers ?? []) for (const k of c.components) if (k.files.includes(file)) return k.id;
+  return null;
+}
+
+export function relationshipsOf(id: string): Relationship[] {
+  return store.atlas?.relationships.filter((r) => r.from === id || r.to === id) ?? [];
+}
+
+export function relKey(r: Relationship): string {
+  return `${r.from}>${r.to}`;
+}
+
+export function setLevel(level: Level, focus: string | null = null): void {
+  if (store.level === level && store.focus === focus) return;
+  store.level = level;
+  store.focus = focus;
+  store.relSelection = null;
+  emit("level");
+}
+
+/** Go one level in at the element: system → containers, container → components, component → code. */
+export function zoomInto(id: string): void {
+  const e = elementById(id);
+  if (!e) return;
+  if (e.kind === "system") setLevel("containers");
+  else if (e.kind === "container") setLevel("components", e.container.id);
+  else if (e.kind === "component") setLevel("code", e.component.id);
+}
+
+export function zoomOut(): void {
+  if (store.level === "code") setLevel("components", containerOf(store.focus ?? "")?.id ?? null);
+  else if (store.level === "components") setLevel("containers");
+  else if (store.level === "containers") setLevel("context");
+}
+
+export function select(id: string | null): void {
+  if (store.selection === id && store.relSelection === null) return;
   store.selection = id;
+  store.relSelection = null;
   emit("selection");
 }
 
-export function setHover(id: number | null): void {
+export function selectRelationship(key: string | null): void {
+  store.relSelection = key;
+  store.selection = null;
+  emit("selection");
+}
+
+export function setHover(id: string | null): void {
   if (store.hover === id) return;
   store.hover = id;
   emit("hover");
 }
 
-export function setTrace(t: Trace | null): void {
-  store.trace = t;
-  emit("trace");
+export function setJourney(j: Journey | null, step = 0): void {
+  store.journey = j;
+  store.journeyStep = j ? Math.max(0, Math.min(j.steps.length, step)) : 0;
+  emit("journey");
 }
 
-/** Building indices the current trace passes through. */
-export function traceBuildings(t: Trace | null = store.trace): Set<number> {
-  const out = new Set<number>();
-  if (!t || !store.build) return out;
-  const byPath = new Map(store.build.model.buildings.map((b, i) => [b.path, i]));
-  for (const s of t.steps) {
-    const i = byPath.get(s.path.split("#")[0]);
-    if (i !== undefined) out.add(i);
-  }
-  return out;
+export function setJourneyStep(n: number): void {
+  if (!store.journey) return;
+  store.journeyStep = Math.max(0, Math.min(store.journey.steps.length, n));
+  emit("journey");
 }
 
 export function snapshot(): Record<string, unknown> {
   const s = store;
-  const b = s.build;
-  const selB = s.selection !== null ? buildingAt(buildingForNode(s.selection)) : null;
+  const a = s.atlas;
+  const d = s.discovery;
   return {
     repo: s.repo,
     graph_loaded: s.graphLoaded,
-    tab: s.tab,
-    step: s.step,
-    steps: stepCount(),
-    step_title: s.step > 0 ? b?.design.steps[s.step - 1]?.title ?? null : null,
-    playing: s.playing,
-    view: s.view,
-    spin: s.spin,
+    level: s.level,
+    focus: s.focus,
+    focus_name: s.focus ? elementName(s.focus) : null,
     selection: s.selection,
-    selection_path: selB ? (s.selection !== null && s.brickOf.has(s.selection) ? `${selB.path}#${b!.model.bricks[s.brickOf.get(s.selection)!].name}` : selB.path) : null,
+    selection_name: s.selection ? elementName(s.selection) : null,
+    relationship: s.relSelection,
     hover: s.hover,
-    trace: s.trace?.entry_path ?? null,
-    trace_on_model: s.traceOnModel,
-    build: b ? { title: b.design.title, source: b.design.source, model: b.design.model ?? null, pieces: b.check.pieces, steps: b.check.steps, sub_builds: b.check.sub_builds, weak: b.check.weak.length, repairs: b.check.repairs?.length ?? 0 } : null,
-    designing: s.design.running,
+    journey: s.journey?.id ?? null,
+    journey_name: s.journey?.name ?? null,
+    journey_step: s.journey ? s.journeyStep : null,
+    journey_steps: s.journey?.steps.length ?? null,
+    atlas: a ? { name: a.system.name, source: a.source, model: a.model ?? null, containers: shownContainers().length, components: shownContainers().reduce((n, c) => n + c.components.length, 0), people: a.people.length, externals: a.externals.length, relationships: a.relationships.length, journeys: a.journeys.length, backed: a.report.backed, survey: a.report.survey, claimed: a.report.claimed, stale: s.stale } : null,
+    discovering: d.running,
+    discovery: d.running || d.finishedAt ? { stage: d.stage, done: d.done, total: d.total, cost_usd: Math.round(d.cost_usd * 100) / 100, agents: d.agents.map((x) => ({ name: x.name, done: x.done, ok: x.ok, reads: x.reads })), notes: d.notes.length } : null,
     search: s.search,
-    panels: { shelf: s.shelfOpen, shelf_tab: s.shelfTab, card: s.selection !== null && s.tab !== "manual", empty: !s.graphLoaded, scanning: s.scanning !== null },
+    panels: { shelf: s.shelfOpen, shelf_tab: s.shelfTab, card: (s.selection !== null || s.relSelection !== null) && !s.notesOpen, notes: s.notesOpen, journey_bar: s.journey !== null, empty: !s.graphLoaded, scanning: s.scanning !== null },
     scanning: s.scanning,
     bridge_port: s.bridgePort,
     ts: new Date().toISOString(),

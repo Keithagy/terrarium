@@ -5,9 +5,9 @@
 //! println!("{} files, {} flows", graph.stats.files, graph.stats.flows);
 //! ```
 
-pub mod build;
+pub mod atlas;
 pub mod cache;
-pub mod designer;
+pub mod discovery;
 pub mod lang;
 pub mod model;
 pub mod query;

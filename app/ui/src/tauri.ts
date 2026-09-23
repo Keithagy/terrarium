@@ -3,7 +3,7 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Boundary, Build, CacheEntry, Endpoint, FlowRow, NodeDetail, ScanDone, Trace } from "./types";
+import type { AtlasView, CacheEntry, NodeDetail, ScanDone } from "./types";
 
 export const inTauri = isTauri();
 
@@ -20,16 +20,13 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 
 export const api = {
   scanRepo: (path: string, fresh = false) => call<ScanDone>("scan_repo", { path, fresh }),
-  getBuild: () => call<Build>("get_build"),
-  designWithClaude: (model?: string) => call<unknown>("design_with_claude", { model }),
-  resetDesign: () => call<Build>("reset_design"),
+  getAtlas: () => call<AtlasView>("get_atlas"),
+  atlasDsl: () => call<string>("atlas_dsl"),
+  discoverWithClaude: (model?: string) => call<unknown>("discover_with_claude", { model }),
+  resetAtlas: () => call<AtlasView>("reset_atlas"),
   getNode: (id: number) => call<NodeDetail>("get_node", { id }),
+  getFile: (path: string) => call<NodeDetail>("get_file", { path }),
   search: (q: string, limit = 30) => call<{ id: number; name: string; path: string; kind: string; lang: string; tags: string[] }[]>("search_nodes", { q, limit }),
-  flows: () => call<FlowRow[]>("list_flows"),
-  traces: () => call<Trace[]>("list_traces"),
-  trace: (entry: number) => call<Trace>("get_trace", { entry }),
-  endpoints: () => call<Endpoint[]>("list_endpoints"),
-  boundaries: (tag?: string) => call<Boundary[]>("list_boundaries", { tag }),
   recent: () => call<CacheEntry[]>("recent_repos"),
   reportUi: (report: unknown) => call<void>("report_ui", { report }),
   reportMetrics: (metrics: unknown) => call<void>("report_metrics", { metrics }),
