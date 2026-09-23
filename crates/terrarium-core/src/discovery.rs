@@ -1,24 +1,26 @@
 //! Discovery: agents read the codebase and write the atlas, and the engine
 //! checks every word against the graph.
 //!
-//! Five kinds of agent run in four stages:
+//! Five kinds of agent run in five stages. The first two are the base C4 pass;
+//! the flows come after it, over what it found, and refer to it by id:
 //!
 //! 1. The surveyor (one agent) reads the manifests, README and entry points and
 //!    decides what the system is, who uses it, what it talks to, and what each
 //!    package runs as.
-//! 2. The scout (one agent) reads where flows begin (routes, commands, jobs,
+//! 2. The field: one agent per container reads that container's code and groups
+//!    it into components, in parallel. Then the engine checks the atlas, so every
+//!    component and relationship the later agents see is real.
+//! 3. The scout (one agent) reads where flows begin (routes, commands, jobs,
 //!    handlers, UI actions) and proposes the key flows, including the ones the
 //!    scanner cannot trace; the engine matches each to a trace, an endpoint or a
 //!    file, and keeps a spread across containers. It runs only when the person did
 //!    not choose the flows, and can run alone ([`propose_flows`]) so a person steers
 //!    from its proposals. When it fails, the survey's picks stand.
-//! 3. The field: one agent per container reads that container's code and
-//!    groups it into components, and one agent per journey follows a flow and
-//!    writes its messages, over the atlas's own elements, as a sequence diagram.
-//!    They run in parallel. The person steering the atlas may choose the flows
-//!    and leave a note for each ([`Options::flows`]); one flow can be narrated
-//!    again on its own ([`narrate_one`]).
-//! 4. The editor (one agent, no tools) writes the summary, the reading guide and
+//! 4. The narrators: one agent per flow follows it and writes its messages over
+//!    the checked atlas's own elements, as a sequence diagram, in parallel. The
+//!    person steering the atlas may choose the flows and leave a note for each
+//!    ([`Options::flows`]); one flow can be narrated again on its own ([`narrate_one`]).
+//! 5. The editor (one agent, no tools) writes the summary, the reading guide and
 //!    the callouts from what the others found.
 //!
 //! Then the engine verifies: components only hold files that exist, every
@@ -624,11 +626,31 @@ fn participants_block(a: &Atlas) -> String {
     for c in a.containers.iter().filter(|c| !c.hidden) {
         s.push_str(&format!("- {} = {} ({})\n", c.id, c.name, atlas::kind_label(&c.kind).to_lowercase()));
         for k in &c.components {
-            s.push_str(&format!("  - {} = {} / {} (component; files: {})\n", k.id, c.name, k.name, k.files.iter().take(6).cloned().collect::<Vec<_>>().join(", ")));
+            s.push_str(&format!("  - {} = {} / {} (component; files: {}){}\n", k.id, c.name, k.name, k.files.iter().take(6).cloned().collect::<Vec<_>>().join(", "), if k.description.is_empty() { String::new() } else { format!(": {}", short(&k.description, 140)) }));
         }
     }
     for x in &a.externals {
         s.push_str(&format!("- {} = {} ({})\n", x.id, x.name, x.kind));
+    }
+    s
+}
+
+fn short(s: &str, n: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n - 1).collect::<String>().trim_end()) }
+}
+
+/// The relationships the atlas holds, by id, so a narrator draws over what the
+/// base C4 pass found rather than guessing. Component-level first, then containers.
+fn relationships_block(a: &Atlas) -> String {
+    let mut s = String::new();
+    let mut rels: Vec<&atlas::Relationship> = a.relationships.iter().collect();
+    rels.sort_by_key(|r| (r.level != "component", r.source != "code"));
+    for r in rels.iter().take(80) {
+        s.push_str(&format!("- {} -> {}: {}{} [{}]\n", r.from, r.to, r.label, if r.technology.is_empty() { String::new() } else { format!(" ({})", r.technology) }, r.source));
+    }
+    if rels.len() > 80 {
+        s.push_str(&format!("- … and {} more\n", rels.len() - 80));
     }
     s
 }
@@ -667,11 +689,13 @@ fn journey_prompt(a: &Atlas, c: &Chosen, draft: &[atlas::Message]) -> String {
     let draft_block = if msgs.is_empty() { String::new() } else { format!("\nThe engine's draft of the messages, over the participants below (keep what is right, reword it, drop what does not belong, add what the code shows):\n{msgs}") };
     let note_block = if note.trim().is_empty() { String::new() } else { format!("\nThe person steering this atlas says: {}\n", note.trim()) };
     let why_block = if c.why.trim().is_empty() { String::new() } else { format!("Why it matters: {}\n", c.why.trim()) };
+    let rels = relationships_block(a);
+    let rels_block = if rels.is_empty() { String::new() } else { format!("\nWhat the atlas already knows joins these participants (the engine backed `code` in the calls, imports and flows it found; `survey` was declared for people and outside systems; `claimed` is an agent's word alone):\n{rels}") };
     format!(
         "You are narrating one journey through {sys} for its sequence diagram: what happens, in order, when {hint}. Read the code at each step (the repository is the current directory). {VOICE}\n\
 \n\
 {why_block}{trace_block}{draft_block}\n\
-Participants (every arrow joins two of these; use the ids or the names exactly as written; a component is finer than its container, so prefer it when you know which one):\n{participants}{note_block}\n\
+Participants (every arrow joins two of these; use the ids or the names exactly as written; a component is finer than its container, so prefer it when you know which one):\n{participants}{rels_block}{note_block}\n\
 Answer with a name (what the user is doing), a 2-sentence summary, and the messages in order: from, to, kind (call, flow, store or return), a short label for the arrow, and a one-sentence caption. The engine will check every message against the calls, imports and flows it found; a message it cannot see is kept but marked as a claim, so only write what the code shows.",
         sys = a.system.name,
         participants = participants_block(a),
@@ -833,8 +857,45 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
         None => tracing::warn!("survey failed; the engine's names stand"),
     }
     progress(Progress::SurveyDone { system: a.system.clone(), people: a.people.clone(), externals: a.externals.clone(), containers: a.containers.clone() });
-    // Journeys to narrate: the person's flows; else the scout's proposals; else the
-    // survey's picks among the traces, topped up with the traces ranked best.
+    // ---- 2. the field: one agent per container. This is the base C4 pass; the
+    // scout and the narrators wait for it, so every arrow they draw joins a
+    // component that exists and is named for what it does.
+    progress(Progress::Stage { stage: "field".into() });
+    let mut jobs: Vec<(usize, AgentCall, String)> = Vec::new();
+    for (i, c) in a.containers.iter().enumerate() {
+        if c.hidden || f.packages[&c.package].1.is_empty() {
+            continue;
+        }
+        jobs.push((i, AgentCall { role: "container".into(), target: Some(c.id.clone()), prompt: container_prompt(g, &f, &a, c), schema: container_schema(), tools: true }, format!("Reading {}", c.name)));
+    }
+    for (ci, run, value) in run_wave(jobs, opts.parallel, runner, progress) {
+        let ok_value = run.ok;
+        runs.push(run);
+        let Some(v) = value.filter(|_| ok_value) else { continue };
+        match serde_json::from_value::<ContainerAnswer>(v) {
+            Ok(ans) => {
+                apply_container(&mut a, ci, ans, &mut claims);
+                let c = a.containers[ci].clone();
+                progress(Progress::ContainerDone { container: c });
+            }
+            Err(e) => {
+                let c = &a.containers[ci];
+                tracing::warn!(container = %c.name, error = %e, "container answer did not match the schema");
+                if let Some(r) = runs.last_mut() {
+                    r.ok = false;
+                    r.error = Some(format!("answer did not match the schema: {e}"));
+                }
+            }
+        }
+    }
+    if !runs.iter().any(|r| r.ok) {
+        let why = runs.iter().filter_map(|r| r.error.clone()).next().unwrap_or_else(|| "no agents ran".into());
+        bail!("every discovery agent failed: {why}");
+    }
+    // The base pass is settled: check it, so what follows refers to real ids.
+    a = atlas::verify(g, &a, Some(&claims));
+
+    // ---- 3. the key flows: the person's, else the scout's, else the survey's picks
     let mut chosen: Vec<Chosen> = Vec::new();
     if !opts.flows.is_empty() {
         for fr in &opts.flows {
@@ -844,7 +905,6 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
             }
         }
     } else if scouting {
-        // ---- 1b. the scout
         progress(Progress::Stage { stage: "scout".into() });
         let (run, found) = scout(g, &a, &traces, &candidates, opts, runner, progress);
         runs.push(run);
@@ -872,92 +932,33 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
         chosen.truncate(opts.max_journeys);
     }
 
-    // ---- 2. the field: containers and journeys, in parallel
-    progress(Progress::Stage { stage: "field".into() });
-    enum Job {
-        Container(usize),
-        Journey(usize),
-    }
-    let mut jobs: Vec<(Job, AgentCall, String)> = Vec::new();
-    for (i, c) in a.containers.iter().enumerate() {
-        if c.hidden || f.packages[&c.package].1.is_empty() {
-            continue;
-        }
-        jobs.push((Job::Container(i), AgentCall { role: "container".into(), target: Some(c.id.clone()), prompt: container_prompt(g, &f, &a, c), schema: container_schema(), tools: true }, format!("Reading {}", c.name)));
-    }
-    // Narrators draw over the engine's components: the container agents have not
-    // answered yet, so the draft is re-resolved through its file paths once they have.
+    // ---- 4. the narrators, one per flow, over the checked atlas
+    progress(Progress::Stage { stage: "journeys".into() });
+    let mut jobs: Vec<(usize, AgentCall, String)> = Vec::new();
     let mut drafts: Vec<Vec<atlas::Message>> = Vec::new();
     for (i, c) in chosen.iter().enumerate() {
         let draft = c.trace.as_ref().map(|t| atlas::messages_from_trace(&a, t)).unwrap_or_default();
-        jobs.push((Job::Journey(i), AgentCall { role: "journey".into(), target: Some(c.id.clone()), prompt: journey_prompt(&a, c, &draft), schema: journey_schema(), tools: true }, format!("Following {}", c.title())));
+        jobs.push((i, AgentCall { role: "journey".into(), target: Some(c.id.clone()), prompt: journey_prompt(&a, c, &draft), schema: journey_schema(), tools: true }, format!("Following {}", c.title())));
         drafts.push(draft);
     }
-    let total = jobs.len();
-    let queue = Mutex::new(jobs);
-    let results: Mutex<Vec<(usize, AgentRun, Option<Value>)>> = Mutex::new(Vec::new());
-    let jobs_kind: Mutex<Vec<Option<Job>>> = Mutex::new((0..total).map(|_| None).collect());
-    std::thread::scope(|sc| {
-        for _ in 0..opts.parallel.max(1).min(total.max(1)) {
-            sc.spawn(|| {
-                loop {
-                    let next = {
-                        let mut q = queue.lock().unwrap();
-                        if q.is_empty() { None } else { Some((q.len() - 1, q.remove(0))) }
-                    };
-                    let Some((_, (job, call, name))) = next else { break };
-                    let idx = {
-                        let mut jk = jobs_kind.lock().unwrap();
-                        let i = jk.iter().position(|j| j.is_none()).unwrap();
-                        jk[i] = Some(job);
-                        i
-                    };
-                    let (run, value) = run_one(&call, &name, runner, progress);
-                    results.lock().unwrap().push((idx, run, value));
-                }
-            });
-        }
-    });
-    let results = results.into_inner().unwrap();
-    let jobs_kind = jobs_kind.into_inner().unwrap();
     let mut journey_answers: Vec<Option<JourneyAnswer>> = (0..chosen.len()).map(|_| None).collect();
-    for (idx, run, value) in results {
+    for (ji, run, value) in run_wave(jobs, opts.parallel, runner, progress) {
         let ok_value = run.ok;
         runs.push(run);
-        match (&jobs_kind[idx], value) {
-            (Some(Job::Container(ci)), Some(v)) if ok_value => match serde_json::from_value::<ContainerAnswer>(v) {
-                Ok(ans) => {
-                    apply_container(&mut a, *ci, ans, &mut claims);
-                    let c = a.containers[*ci].clone();
-                    progress(Progress::ContainerDone { container: c });
+        let Some(v) = value.filter(|_| ok_value) else { continue };
+        match serde_json::from_value::<JourneyAnswer>(v) {
+            Ok(ans) => journey_answers[ji] = Some(ans),
+            Err(e) => {
+                tracing::warn!(journey = %chosen[ji].title(), error = %e, "narrator answer did not match the schema");
+                if let Some(r) = runs.last_mut() {
+                    r.ok = false;
+                    r.error = Some(format!("answer did not match the schema: {e}"));
                 }
-                Err(e) => {
-                    let c = &a.containers[*ci];
-                    tracing::warn!(container = %c.name, error = %e, "container answer did not match the schema");
-                    if let Some(r) = runs.last_mut() {
-                        r.ok = false;
-                        r.error = Some(format!("answer did not match the schema: {e}"));
-                    }
-                }
-            },
-            (Some(Job::Journey(ji)), Some(v)) if ok_value => match serde_json::from_value::<JourneyAnswer>(v) {
-                Ok(ans) => journey_answers[*ji] = Some(ans),
-                Err(e) => {
-                    if let Some(r) = runs.last_mut() {
-                        r.ok = false;
-                        r.error = Some(format!("answer did not match the schema: {e}"));
-                    }
-                }
-            },
-            _ => {}
+            }
         }
     }
-    if !runs.iter().any(|r| r.ok) {
-        let why = runs.iter().filter_map(|r| r.error.clone()).next().unwrap_or_else(|| "no agents ran".into());
-        bail!("every discovery agent failed: {why}");
-    }
-    // Components are settled: check them so journeys and the editor see real ids.
-    a = atlas::verify(g, &a, Some(&claims));
+    // A journey that loses every arrow in the check is said so, never lost in silence.
+    let mut lost: Vec<String> = Vec::new();
     for (i, c) in chosen.iter().enumerate() {
         let j = match journey_answers[i].take() {
             Some(ans) => Some(journey_from_answer(&a, c, &drafts[i], ans)),
@@ -969,12 +970,20 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
                 j
             }),
         };
-        if let Some(j) = j {
-            let checked = atlas::upsert_journey(g, &a, j);
-            if let Some(j) = checked.journeys.iter().find(|x| x.id == c.id) {
-                progress(Progress::JourneyDone { journey: j.clone() });
+        match j {
+            Some(j) => {
+                let n = j.messages.len();
+                let checked = atlas::upsert_journey(g, &a, j);
+                match checked.journeys.iter().find(|x| x.id == c.id) {
+                    Some(j) => progress(Progress::JourneyDone { journey: j.clone() }),
+                    None => {
+                        tracing::warn!(journey = %c.title(), messages = n, "journey dropped: no message joined two elements of the atlas");
+                        lost.push(format!("Dropped journey `{}`: none of its {n} messages joined two elements of the atlas.", c.title()));
+                    }
+                }
+                a = checked;
             }
-            a = checked;
+            None => lost.push(format!("Dropped journey `{}`: the narrator gave no answer and the scanner has no trace to draw from.", c.title())),
         }
     }
     // A person's journeys ride along untouched; the check re-resolves their messages.
@@ -984,7 +993,7 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
         }
     }
 
-    // ---- 3. the editor
+    // ---- 5. the editor
     progress(Progress::Stage { stage: "editor".into() });
     let call = AgentCall { role: "editor".into(), target: None, prompt: editor_prompt(g, &a), schema: editor_schema(), tools: false };
     let (run, value) = run_one(&call, "Writing the guide", runner, progress);
@@ -1001,9 +1010,10 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
         a.guide = atlas::engine_atlas(g).guide;
     }
 
-    // ---- 4. verify
+    // ---- 6. verify
     progress(Progress::Stage { stage: "verify".into() });
-    let a = atlas::verify(g, &a, Some(&claims));
+    let mut a = atlas::verify(g, &a, Some(&claims));
+    a.report.notes.extend(lost);
     progress(Progress::Verified { atlas: a.clone() });
     let cost = runs.iter().map(|r| r.cost_usd).sum();
     Ok((a, Run { model: opts.model.clone(), agents: runs, cost_usd: cost, secs: started.elapsed().as_secs_f64() }))
@@ -1359,6 +1369,29 @@ fn run_one(call: &AgentCall, name: &str, runner: &Runner, progress: &(dyn Fn(Pro
     };
     progress(Progress::AgentDone { role: run.role.clone(), target: run.target.clone(), ok: run.ok, cost_usd: run.cost_usd, secs: run.secs, error: run.error.clone() });
     (run, value)
+}
+
+/// Run a wave of agents, `parallel` at a time, and hand back each result with its key.
+fn run_wave<K: Copy + Send>(jobs: Vec<(K, AgentCall, String)>, parallel: usize, runner: &Runner, progress: &(dyn Fn(Progress) + Sync)) -> Vec<(K, AgentRun, Option<Value>)> {
+    let total = jobs.len();
+    let queue = Mutex::new(jobs);
+    let results: Mutex<Vec<(K, AgentRun, Option<Value>)>> = Mutex::new(Vec::new());
+    std::thread::scope(|sc| {
+        for _ in 0..parallel.max(1).min(total.max(1)) {
+            sc.spawn(|| {
+                loop {
+                    let next = {
+                        let mut q = queue.lock().unwrap();
+                        if q.is_empty() { None } else { Some(q.remove(0)) }
+                    };
+                    let Some((key, call, name)) = next else { break };
+                    let (run, value) = run_one(&call, &name, runner, progress);
+                    results.lock().unwrap().push((key, run, value));
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap()
 }
 
 // ---- the real runner -------------------------------------------------------------------

@@ -241,7 +241,7 @@ export interface CacheEntry {
 
 export type Progress =
   | { event: "started"; model: string; containers: number; journeys: number; scout: boolean }
-  | { event: "stage"; stage: "survey" | "scout" | "field" | "editor" | "verify" }
+  | { event: "stage"; stage: "survey" | "field" | "scout" | "journeys" | "editor" | "verify" }
   | { event: "agent_started"; role: string; target: string | null; name: string }
   | { event: "agent_activity"; role: string; target: string | null; kind: "reading" | "searching"; path?: string; query?: string }
   | { event: "agent_done"; role: string; target: string | null; ok: boolean; cost_usd: number; secs: number; error: string | null }

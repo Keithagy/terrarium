@@ -234,8 +234,9 @@ function note(kind: Note["kind"], text: string): void {
 
 const STAGE_WORDS: Record<string, string> = {
   survey: "Surveying: what the system is, who uses it, what it talks to",
-  scout: "Scouting: which flows show what the system does, including the ones the scanner cannot trace",
-  field: "In the field: one agent per container and per journey, reading the code",
+  field: "In the field: one agent per container, grouping its code into components; then the check",
+  scout: "Scouting the checked atlas: which flows show what the system does, including the ones the scanner cannot trace",
+  journeys: "Narrating: one agent per flow, drawing its sequence over the atlas's own components",
   editor: "Editing: the summary, where to start, what to know",
   verify: "Checking every relationship against the code",
 };
@@ -410,7 +411,7 @@ function renderNotesHead(): void {
   head.innerHTML = `<div class="notes-kicker">${d.running ? `<span class="pulse"></span>Discovering` : d.error ? "Discovery failed" : "Discovered"}${d.model ? ` on ${esc(d.model)}` : ""}</div><h2>${d.running ? `${d.done} of ${d.total || "?"} agents done` : d.error ? "Stopped" : "Field notes"}</h2><div class="notes-meta">${elapsed} · $${d.cost_usd.toFixed(2)}</div>`;
 }
 
-const STAGES: [string, string][] = [["survey", "Survey"], ["scout", "Scout"], ["field", "Field"], ["editor", "Editor"], ["verify", "Check"]];
+const STAGES: [string, string][] = [["survey", "Survey"], ["field", "Containers"], ["scout", "Scout"], ["journeys", "Flows"], ["editor", "Editor"], ["verify", "Check"]];
 
 function renderNotes(): void {
   const panel = $("#notes");

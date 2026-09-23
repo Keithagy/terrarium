@@ -75,10 +75,14 @@ follows its files when components are regrouped, so a journey survives a redisco
 A journey's `source` says who last wrote it; a person's journeys (`user`) ride along
 untouched through `discover`.
 
-Key flows: unless the person chose the flows, a scout agent runs after the survey. It
+Key flows come after the base C4 pass (survey, one agent per container, the check), so
+the scout and the narrators see the real containers, components and relationships and
+refer to them by id; the narrators' prompt lists them with the relationships the code
+backs. Unless the person chose the flows, a scout agent runs on the checked atlas. It
 reads where flows begin (routes, commands, jobs, queue consumers, UI actions, the README)
 and proposes up to `--journeys` flows, each with a name, why it matters, and where it
-starts. The engine matches each start to the code: a trace's entry, a symbol, a route or
+starts. A journey that loses every arrow in the check is reported in the atlas's notes
+rather than dropped in silence. The engine matches each start to the code: a trace's entry, a symbol, a route or
 command (followed from its caller, else its handler), or a file. A flow the scanner cannot
 trace is still narrated: the narrator starts at the symbol or file, or finds the start
 itself. Near copies are dropped and flows that start in different containers come first.

@@ -167,7 +167,8 @@ fn agents_write_the_words_and_the_engine_checks_them() {
     assert_eq!(j.source, "claude");
     assert!(j.steps.iter().any(|s| s.caption == "The page asks the API for the user list over HTTP."), "{:#?}", j.steps);
     let ms = &j.messages;
-    assert_eq!((ms[0].from.as_str(), ms[0].to.as_str(), ms[0].source.as_str()), ("p:developer", "c:polyglot-web", "survey"));
+    // the narrator said "Web front end"; the draft, drawn over the checked components, knows which one the page starts in
+    assert_eq!((ms[0].from.as_str(), ms[0].to.as_str(), ms[0].source.as_str()), ("p:developer", "c:polyglot-web/helpers", "survey"));
     let http = ms.iter().find(|m| m.label == "GET /api/users").unwrap();
     assert_eq!((http.from.as_str(), http.to.as_str(), http.kind.as_str(), http.source.as_str(), http.by.as_str()), ("c:polyglot-web/entry-point", "c:polyglot-api/entry-point", "flow", "code", "claude"), "the narrator said Helpers, but api.ts is in the entry point: the code decides");
     assert_eq!(http.from_path, "web/src/api.ts#fetchUsers", "a message that matches the engine's draft keeps its evidence");
@@ -191,7 +192,7 @@ fn agents_write_the_words_and_the_engine_checks_them() {
     let events: Vec<String> = seen.lock().unwrap().iter().map(|e| e["event"].as_str().unwrap().to_string()).collect();
     assert_eq!(events[0], "started");
     let stages: Vec<&String> = events.iter().filter(|e| *e == "stage").collect();
-    assert_eq!(stages.len(), 5, "survey, scout, field, editor, verify");
+    assert_eq!(stages.len(), 6, "survey, field, scout, journeys, editor, verify");
     assert_eq!(events.iter().filter(|e| *e == "proposed").count(), 1);
     assert!(events.iter().any(|e| e == "agent_activity"));
     assert_eq!(events.iter().filter(|e| *e == "container_done").count(), 3);
@@ -273,7 +274,7 @@ fn the_scout_proposes_key_flows_and_the_narrators_follow_them() {
     assert_eq!((flows[1]["matched"].as_str(), flows[1]["entry"].as_str(), flows[1]["containers"][0].as_str()), (Some("endpoint"), Some("api/main.py#health"), Some("c:polyglot-api")));
     assert_eq!((flows[2]["matched"].as_str(), flows[2]["entry"].as_str(), flows[2]["containers"][0].as_str()), (Some("none"), Some(""), Some("c:worker")));
     let stages: Vec<&str> = seen.iter().filter(|e| e["event"] == "stage").map(|e| e["stage"].as_str().unwrap()).collect();
-    assert_eq!(stages, ["survey", "scout", "field", "editor", "verify"]);
+    assert_eq!(stages, ["survey", "field", "scout", "journeys", "editor", "verify"], "the scout and the narrators run after the base C4 pass is checked");
     assert!(seen.iter().any(|e| e["event"] == "agent_activity" && e["role"] == "scout" && e["path"] == "api/main.py"));
 }
 
