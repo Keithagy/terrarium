@@ -96,3 +96,7 @@ screenshots; it evaluates JavaScript in the webview; and it can click and type b
 ## Design
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the visual brief and tokens.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

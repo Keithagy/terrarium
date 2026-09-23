@@ -6,3 +6,4 @@ app/src-tauri/gen/
 .terrarium/
 *.log
 .DS_Store
+.claude/worktrees/

@@ -10,7 +10,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/keithang/terrarium"
+repository = "https://github.com/Keithagy/terrarium"
 
 [workspace.dependencies]
 terrarium-core = { path = "crates/terrarium-core" }
