@@ -3,10 +3,11 @@
 // reachable from the devtools console via `window.__terrarium`.
 
 import { api, log, on } from "./tauri";
-import { store, snapshot, select, setLevel, setJourney, setJourneyStep, elementById, shownContainers, type Level } from "./store";
+import { store, snapshot, select, setLevel, setJourney, setJourneyStep, setView, elementById, shownContainers, currentProjection, type Level } from "./store";
 import type { Actions } from "./panels";
 import { jumpTo, playJourney } from "./panels";
 import { exportSvg, fit } from "./atlas";
+import { sequenceSnapshot } from "./sequence";
 
 interface BridgeRequest {
   id: number;
@@ -64,10 +65,13 @@ export function initBridge(actions: Actions): void {
       const q = String(p.journey).toLowerCase();
       const j = store.atlas?.journeys.find((x) => x.id === q || x.name.toLowerCase() === q || x.entry.toLowerCase() === q);
       if (!j) return { error: `no journey matches \`${p.journey}\`` };
-      playJourney(j, p.step == null ? 0 : Number(p.step));
+      const view = p.view === "sequence" || p.view === "map" ? p.view : undefined;
+      playJourney(j, p.step == null ? 0 : Number(p.step), view);
+      if (view) setView(view);
       if (p.step != null) setJourneyStep(Number(p.step));
       await settled(350);
-      return { ...snapshot(), steps: j.steps.map((s, i) => ({ n: i + 1, from: s.from, to: s.to, label: s.label, caption: s.caption })) };
+      const proj = currentProjection();
+      return { ...snapshot(), steps: (proj?.messages ?? []).map((m, i) => ({ n: i + 1, from: m.from, to: m.to, kind: m.kind, label: m.label, source: m.source, caption: m.caption })), messages: j.messages.length };
     },
     search: async (p) => {
       const input = document.querySelector<HTMLInputElement>("#search")!;
@@ -180,6 +184,7 @@ export function uiSnapshot(): Record<string, unknown> {
     overlays,
     card: card && !card.hidden ? { title: card.querySelector("[data-testid=card-title]")?.textContent?.trim(), chips: [...card.querySelectorAll(".chip")].map((c) => c.textContent) } : null,
     diagram: diagram ? { nodes: [...diagram.querySelectorAll<SVGGElement>("g.node")].map((g) => ({ id: g.dataset.id, title: g.querySelector(".c4-title")?.textContent, state: g.dataset.state || undefined, dim: g.classList.contains("is-dim") || undefined })), edges: [...diagram.querySelectorAll<SVGGElement>("g.edge")].map((g) => ({ from: g.dataset.from, to: g.dataset.to, source: [...g.classList].find((c) => c.startsWith("is-") && ["is-code", "is-survey", "is-claimed"].includes(c))?.slice(3), journey: g.classList.contains("is-journey") || undefined })) } : null,
+    sequence: sequenceSnapshot() ?? undefined,
     notes: store.notesOpen ? store.discovery.notes.slice(-30).map((n) => n.text) : undefined,
     toasts,
     elements,
@@ -191,9 +196,10 @@ function safeJson(v: unknown): unknown {
   try { return JSON.parse(JSON.stringify(v ?? null)); } catch { return String(v); }
 }
 
-/** Two frames plus a short wait: long enough for a render and a level ease. */
+/** Two frames plus a short wait: long enough for a render and a level ease. An occluded
+ * window gets no animation frames, so a timer stands in for them rather than hang the caller. */
 async function settled(ms: number): Promise<void> {
-  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  await Promise.race([new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))), sleep(150)]);
   await sleep(ms);
 }
 

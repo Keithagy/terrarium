@@ -2,8 +2,9 @@
 // the journey bar, overlays and toasts.
 
 import { api, log } from "./tauri";
-import { store, subscribe, emit, select, selectRelationship, setLevel, setJourney, setJourneyStep, zoomInto, elementById, elementName, shownContainers, containerOf, relationshipsOf, relKey, componentOfFile, type ShelfTab } from "./store";
+import { store, subscribe, emit, select, selectRelationship, setLevel, setJourney, setJourneyStep, setView, startDraft, currentProjection, journeyLength, zoomInto, elementById, elementName, shownContainers, containerOf, relationshipsOf, relKey, componentOfFile, type ShelfTab } from "./store";
 import { EXTERNAL_LABEL, KIND_LABEL, langOf, type Journey, type Relationship } from "./types";
+import { newJourney } from "./sequence";
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T;
 
@@ -233,9 +234,10 @@ function renderMap(): void {
   el.appendChild(frag);
 }
 
-export function playJourney(j: Journey, step = 0): void {
+export function playJourney(j: Journey, step = 0, view?: "map" | "sequence"): void {
   setJourney(j, step);
-  if (store.level === "code") setLevel("containers");
+  if (view) setView(view);
+  if (store.level === "code" && store.view === "map") setLevel("containers");
   select(null);
   setShelfTab("journeys");
 }
@@ -245,14 +247,23 @@ function renderJourneys(): void {
   const a = store.atlas;
   el.innerHTML = "";
   if (!a) return;
-  if (!a.journeys.length) { el.innerHTML = `<p class="empty-note">No journey crosses a boundary yet. Journeys follow a call from an entry point across every language it touches.</p>`; return; }
+  const head = document.createElement("div");
+  head.className = "journeys-head";
+  head.innerHTML = `<span class="meta">${a.journeys.length ? `${a.journeys.length} ${a.journeys.length === 1 ? "journey" : "journeys"}` : "No journeys yet"}</span><button class="ghost" data-testid="journey-new" title="Write a journey of your own: pick the elements, add the arrows">+ New journey</button>`;
+  head.querySelector("[data-testid=journey-new]")!.addEventListener("click", () => { setShelfTab("journeys"); newJourney(); });
+  el.appendChild(head);
+  if (!a.journeys.length) { el.insertAdjacentHTML("beforeend", `<p class="empty-note">No journey crosses a boundary yet. Journeys follow a call from an entry point across every language it touches; you can also write one by hand.</p>`); return; }
   for (const j of a.journeys) {
     const b = document.createElement("button");
     b.className = `journey-row${store.journey?.id === j.id ? " is-selected" : ""}`;
     b.dataset.testid = `journey-${j.id}`;
-    const langs = [...new Set(j.steps.flatMap((s) => [s.from, s.to]).map((id) => containerOf(id)).filter(Boolean).map((c) => langOf(c!.technology, c!.language)))];
-    b.innerHTML = `<span class="jr-top"><span class="name">${esc(j.name)}</span><span class="meta">${j.steps.length} steps</span></span><span class="jr-summary">${esc(j.summary)}</span><span class="jr-langs">${langs.map((l) => `<span class="dot" data-lang="${l}"></span>`).join("")}<span class="jr-entry">${esc(j.entry)}</span></span>`;
-    b.addEventListener("click", () => { if (store.journey?.id === j.id) setJourney(null); else playJourney(j); });
+    const langs = [...new Set(j.messages.flatMap((s) => [s.from, s.to]).map((id) => containerOf(id)).filter(Boolean).map((c) => langOf(c!.technology, c!.language)))];
+    const claimed = j.messages.filter((m) => m.source === "claimed").length;
+    const who = j.source === "user" ? `<span class="chip is-user">yours</span>` : j.source === "claude" ? `<span class="chip is-claude">Claude</span>` : "";
+    const busy = store.narrating === j.id ? `<span class="spinner is-small"></span>` : "";
+    b.innerHTML = `<span class="jr-top"><span class="name">${esc(j.name)}</span>${busy}${who}<span class="meta">${j.messages.length} ${j.messages.length === 1 ? "message" : "messages"}${claimed ? ` · <span class="is-claimed-text">${claimed} claimed</span>` : ""}</span></span><span class="jr-summary">${esc(j.summary)}</span><span class="jr-langs">${langs.map((l) => `<span class="dot" data-lang="${l}"></span>`).join("")}<span class="jr-entry">${esc(j.entry || (j.note ? `✎ ${j.note}` : "written by hand"))}</span><span class="jr-open" data-testid="journey-${j.id}-sequence" title="Open as a sequence diagram">sequence ›</span></span>`;
+    b.querySelector(".jr-open")!.addEventListener("click", (e) => { e.stopPropagation(); playJourney(j, 0, "sequence"); });
+    b.addEventListener("click", () => { if (store.journey?.id === j.id && !store.draft) setJourney(null); else playJourney(j); });
     el.appendChild(b);
   }
 }
@@ -309,8 +320,8 @@ function elementCard(id: string): string {
   const rels = relationshipsOf(id);
   const outs = rels.filter((r) => r.from === id);
   const ins = rels.filter((r) => r.to === id);
-  const journeys = a.journeys.filter((j) => j.steps.some((s) => s.from === id || s.to === id || containerOf(s.from)?.id === id || containerOf(s.to)?.id === id));
-  const jrows = journeys.length ? `<div class="card-section"><h3>Journeys through here</h3>${journeys.map((j) => `<button class="nb" data-journey="${esc(j.id)}"><span class="arrow">▶</span><span class="nb-name">${esc(j.name)}</span><span class="nb-label">${j.steps.length} steps</span></button>`).join("")}</div>` : "";
+  const journeys = a.journeys.filter((j) => j.messages.some((s) => s.from === id || s.to === id || containerOf(s.from)?.id === id || containerOf(s.to)?.id === id));
+  const jrows = journeys.length ? `<div class="card-section"><h3>Journeys through here</h3>${journeys.map((j) => `<button class="nb" data-journey="${esc(j.id)}"><span class="arrow">▶</span><span class="nb-name">${esc(j.name)}</span><span class="nb-label">${j.messages.length} messages</span></button>`).join("")}</div>` : "";
   switch (e.kind) {
     case "system":
       return `${close}
@@ -378,7 +389,7 @@ function relationshipCard(key: string): string {
   }
   const r = rels[0];
   const ev = r.evidence ?? [];
-  const journeys = a.journeys.map((j) => ({ j, i: j.steps.findIndex((s) => s.from === r.from && s.to === r.to || (containerOf(s.from)?.id === r.from && containerOf(s.to)?.id === r.to)) })).filter((x) => x.i >= 0);
+  const journeys = a.journeys.map((j) => ({ j, i: j.messages.findIndex((s) => s.from === r.from && s.to === r.to || (containerOf(s.from)?.id === r.from && containerOf(s.to)?.id === r.to)) })).filter((x) => x.i >= 0);
   return `${close}
     <div class="card-kind">Relationship · ${esc(r.level)} level</div>
     <h2 data-testid="card-title"><button class="link-quiet" data-jump="${esc(r.from)}">${esc(elementName(r.from))}</button> → <button class="link-quiet" data-jump="${esc(r.to)}">${esc(elementName(r.to))}</button></h2>
@@ -401,22 +412,29 @@ function initJourneyBar(): void {
 
 function renderJourneyBar(): void {
   const bar = $("#journey-bar");
-  const j = store.journey;
+  const j = store.draft ?? store.journey;
   bar.hidden = !j;
   document.body.classList.toggle("has-journey", !!j);
   if (!j) return;
+  const p = currentProjection();
+  const total = journeyLength();
   const n = store.journeyStep;
-  const step = n > 0 ? j.steps[n - 1] : null;
-  $("#jb-title").textContent = j.name;
-  $("#jb-count").textContent = n > 0 ? `Step ${n} of ${j.steps.length}` : `${j.steps.length} steps, all shown`;
-  $("#jb-caption").innerHTML = step ? `<span class="jb-from">${esc(elementName(step.from))}</span><span class="jb-arrow">→</span><span class="jb-to">${esc(elementName(step.to))}</span><span class="jb-text">${esc(step.caption)}</span>` : `<span class="jb-text">${esc(j.summary)}</span>`;
+  const step = n > 0 ? p?.messages[n - 1] ?? null : null;
+  $("#jb-title").textContent = j.name || "Untitled journey";
+  $("#jb-count").textContent = n > 0 ? `Step ${n} of ${total}` : `${total} ${total === 1 ? "step" : "steps"} at this level, all shown`;
+  $("#jb-caption").innerHTML = step
+    ? `<span class="jb-from">${esc(elementName(step.from))}</span><span class="jb-arrow">${step.kind === "return" ? "⇠" : "→"}</span><span class="jb-to">${esc(elementName(step.to))}</span><span class="jb-text">${esc(step.caption || step.label)}</span>${step.source === "claimed" ? `<span class="chip is-claimed">claimed</span>` : ""}`
+    : `<span class="jb-text">${esc(j.summary || "No summary yet.")}</span>`;
   $<HTMLButtonElement>("#jb-prev").disabled = n <= 0;
-  $<HTMLButtonElement>("#jb-next").disabled = n >= j.steps.length;
+  $<HTMLButtonElement>("#jb-next").disabled = n >= total;
   const range = $<HTMLInputElement>("#jb-range");
-  range.max = String(j.steps.length);
+  range.max = String(total);
   range.value = String(n);
-  range.style.setProperty("--fill", `${(n / Math.max(1, j.steps.length)) * 100}%`);
+  range.style.setProperty("--fill", `${(n / Math.max(1, total)) * 100}%`);
   range.oninput = () => setJourneyStep(Number(range.value));
+  const edit = $<HTMLButtonElement>("#jb-edit");
+  edit.hidden = store.draft !== null;
+  edit.onclick = () => startDraft();
 }
 
 // ---- overlays -----------------------------------------------------------------

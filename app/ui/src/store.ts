@@ -1,11 +1,13 @@
 // Single source of truth for the UI. The diagram and the panels subscribe to it;
 // the bridge reads it to answer `/state`.
 
-import type { Atlas, Component, Container, Journey, Relationship, Stats } from "./types";
+import type { Atlas, Component, Container, Journey, Message, Relationship, Stats } from "./types";
 
 /** The C4 levels. `code` is one component's files. */
 export type Level = "context" | "containers" | "components" | "code";
 export type ShelfTab = "map" | "journeys" | "guide";
+/** How a playing journey is shown: numbered on the C4 map, or as a sequence diagram. */
+export type View = "map" | "sequence";
 
 export interface AgentState {
   key: string;
@@ -57,8 +59,13 @@ export interface Store {
   relSelection: string | null;
   hover: string | null;
   journey: Journey | null;
-  /** 1-based step of the playing journey; 0 shows the whole path. */
+  /** 1-based step of the playing journey, counted over its projection at the current level; 0 shows the whole path. */
   journeyStep: number;
+  view: View;
+  /** A journey being edited: a copy that the sequence view draws live until it is saved. */
+  draft: Journey | null;
+  /** Id of the journey a narrator is rewriting, while it is. */
+  narrating: string | null;
   shelfTab: ShelfTab;
   discovery: DiscoveryState;
   notesOpen: boolean;
@@ -85,6 +92,9 @@ export const store: Store = {
   hover: null,
   journey: null,
   journeyStep: 0,
+  view: "map",
+  draft: null,
+  narrating: null,
   shelfTab: "map",
   discovery: freshDiscovery(),
   notesOpen: false,
@@ -114,11 +124,86 @@ export function setAtlas(a: Atlas, stale: string | null): void {
   store.graphLoaded = true;
   if (store.focus && !elementById(store.focus)) { store.focus = null; store.level = "containers"; }
   if (store.selection && !elementById(store.selection)) store.selection = null;
-  if (store.journey) store.journey = a.journeys.find((j) => j.id === store.journey!.id) ?? null;
+  if (store.journey) {
+    store.journey = a.journeys.find((j) => j.id === store.journey!.id) ?? null;
+    if (!store.journey) { store.view = "map"; store.draft = null; }
+    store.journeyStep = Math.min(store.journeyStep, journeyLength());
+  }
   emit("atlas");
   emit("level");
   emit("selection");
   emit("journey");
+}
+
+// ---- journeys projected onto a level ----------------------------------------------------
+
+export interface PMessage {
+  /** 1-based index of the first journey message behind this arrow. */
+  n: number;
+  from: string;
+  to: string;
+  label: string;
+  caption: string;
+  kind: Message["kind"];
+  depth: number;
+  source: Message["source"];
+  by: Message["by"];
+}
+
+export interface Projection {
+  participants: string[];
+  messages: PMessage[];
+}
+
+/** Where an element sits at a level: itself, its container, or the system; `null` when it has no box there. */
+export function atLevel(id: string, level: Level, focus: string | null): string | null {
+  if (id.startsWith("p:") || id.startsWith("x:")) return id;
+  const c = containerOf(id);
+  if (!c || c.hidden) return null;
+  if (level === "context") return "s";
+  if (level === "containers") return c.id;
+  const f = focus ? containerOf(focus)?.id ?? null : null;
+  if (f === c.id) return id.includes("/") ? id : c.components[0]?.id ?? null;
+  return c.id;
+}
+
+/** The same rule as `atlas::project` in the core: messages inside one box vanish, consecutive
+ * messages that land on the same arrow merge. Every level of the atlas is a view of one list. */
+export function project(j: Journey, level: Level, focus: string | null): Projection {
+  const lvl: Level = level === "code" ? "components" : level;
+  const participants: string[] = [];
+  const messages: PMessage[] = [];
+  j.messages.forEach((m, i) => {
+    const from = atLevel(m.from, lvl, focus);
+    const to = atLevel(m.to, lvl, focus);
+    if (!from || !to || from === to) return;
+    const last = messages[messages.length - 1];
+    if (last && last.from === from && last.to === to && last.kind === m.kind && (last.label === m.label || lvl !== "components")) {
+      if (!last.label.includes(m.label) && last.label.split(", ").length < 3) last.label = `${last.label}, ${m.label}`;
+      return;
+    }
+    for (const p of [from, to]) if (!participants.includes(p)) participants.push(p);
+    messages.push({ n: i + 1, from, to, label: m.label, caption: m.caption, kind: m.kind, depth: m.depth, source: m.source, by: m.by });
+  });
+  return { participants, messages };
+}
+
+/** The journey on show (the draft while editing), projected onto the current level. */
+export function currentProjection(): Projection | null {
+  const j = store.draft ?? store.journey;
+  if (!j) return null;
+  return project(j, store.level, store.focus);
+}
+
+export function journeyLength(): number {
+  return currentProjection()?.messages.length ?? 0;
+}
+
+export function setView(v: View): void {
+  if (store.view === v) return;
+  store.view = v;
+  emit("journey");
+  emit("ui");
 }
 
 export function shownContainers(): Container[] {
@@ -185,7 +270,10 @@ export function setLevel(level: Level, focus: string | null = null): void {
   store.level = level;
   store.focus = focus;
   store.relSelection = null;
+  // the step counts arrows at this level; keep it in range
+  if (store.journey) store.journeyStep = Math.min(store.journeyStep, journeyLength());
   emit("level");
+  if (store.journey) emit("journey");
 }
 
 /** Go one level in at the element: system → containers, container → components, component → code. */
@@ -223,15 +311,50 @@ export function setHover(id: string | null): void {
 }
 
 export function setJourney(j: Journey | null, step = 0): void {
+  if (store.draft && store.draft.id !== j?.id) store.draft = null;
   store.journey = j;
-  store.journeyStep = j ? Math.max(0, Math.min(j.steps.length, step)) : 0;
+  if (!j) store.view = "map";
+  store.journeyStep = j ? Math.max(0, Math.min(journeyLength(), step)) : 0;
   emit("journey");
+  emit("ui");
 }
 
 export function setJourneyStep(n: number): void {
   if (!store.journey) return;
-  store.journeyStep = Math.max(0, Math.min(store.journey.steps.length, n));
+  store.journeyStep = Math.max(0, Math.min(journeyLength(), n));
   emit("journey");
+}
+
+/** Start editing the playing journey: the sequence view draws the draft from now on. */
+export function startDraft(from?: Journey): void {
+  const j = from ?? store.journey;
+  if (!j) return;
+  store.draft = JSON.parse(JSON.stringify(j)) as Journey;
+  if (!store.journey || store.journey.id !== j.id) { store.journey = j; store.journeyStep = 0; }
+  store.view = "sequence";
+  emit("journey");
+  emit("ui");
+}
+
+export function endDraft(): void {
+  store.draft = null;
+  if (store.journey) store.journeyStep = Math.min(store.journeyStep, journeyLength());
+  emit("journey");
+  emit("ui");
+}
+
+/** Every element a message may join, finest grain first: people, components, containers, outside systems. */
+export function participantChoices(): { id: string; name: string; group: string }[] {
+  const a = store.atlas;
+  if (!a) return [];
+  const out: { id: string; name: string; group: string }[] = [];
+  for (const p of a.people) out.push({ id: p.id, name: p.name, group: "People" });
+  for (const c of shownContainers()) {
+    out.push({ id: c.id, name: c.name, group: "Containers" });
+    for (const k of c.components) out.push({ id: k.id, name: `${c.name} / ${k.name}`, group: "Components" });
+  }
+  for (const x of a.externals) out.push({ id: x.id, name: x.name, group: "Outside" });
+  return out;
 }
 
 export function snapshot(): Record<string, unknown> {
@@ -251,12 +374,16 @@ export function snapshot(): Record<string, unknown> {
     journey: s.journey?.id ?? null,
     journey_name: s.journey?.name ?? null,
     journey_step: s.journey ? s.journeyStep : null,
-    journey_steps: s.journey?.steps.length ?? null,
+    journey_steps: s.journey ? journeyLength() : null,
+    journey_source: s.journey?.source ?? null,
+    view: s.journey ? s.view : null,
+    editing: s.draft?.id ?? null,
+    narrating: s.narrating,
     atlas: a ? { name: a.system.name, source: a.source, model: a.model ?? null, containers: shownContainers().length, components: shownContainers().reduce((n, c) => n + c.components.length, 0), people: a.people.length, externals: a.externals.length, relationships: a.relationships.length, journeys: a.journeys.length, backed: a.report.backed, survey: a.report.survey, claimed: a.report.claimed, stale: s.stale } : null,
     discovering: d.running,
     discovery: d.running || d.finishedAt ? { stage: d.stage, done: d.done, total: d.total, cost_usd: Math.round(d.cost_usd * 100) / 100, agents: d.agents.map((x) => ({ name: x.name, done: x.done, ok: x.ok, reads: x.reads })), notes: d.notes.length } : null,
     search: s.search,
-    panels: { shelf: s.shelfOpen, shelf_tab: s.shelfTab, card: (s.selection !== null || s.relSelection !== null) && !s.notesOpen, notes: s.notesOpen, journey_bar: s.journey !== null, empty: !s.graphLoaded, scanning: s.scanning !== null },
+    panels: { shelf: s.shelfOpen, shelf_tab: s.shelfTab, card: (s.selection !== null || s.relSelection !== null) && !s.notesOpen, notes: s.notesOpen, journey_bar: s.journey !== null, sequence: s.journey !== null && s.view === "sequence", editor: s.draft !== null, empty: !s.graphLoaded, scanning: s.scanning !== null },
     scanning: s.scanning,
     bridge_port: s.bridgePort,
     ts: new Date().toISOString(),

@@ -118,7 +118,7 @@ pub fn atlas_dsl(state: State<'_, Arc<AppState>>) -> Res<String> {
 /// journey, and an editor. Progress arrives as `discover:progress` events, with
 /// partial results the UI draws as they land; the checked atlas is saved next to
 /// the graph and becomes the current one.
-pub fn do_discover(app: &AppHandle, model: Option<String>) -> anyhow::Result<Value> {
+pub fn do_discover(app: &AppHandle, model: Option<String>, flows: Vec<discovery::FlowRequest>) -> anyhow::Result<Value> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let graph = state.graph().ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
     if state.discovering.swap(true, Ordering::SeqCst) {
@@ -127,7 +127,9 @@ pub fn do_discover(app: &AppHandle, model: Option<String>) -> anyhow::Result<Val
     let _ = app.emit("discover:started", json!({}));
     let result = (|| {
         let _span = tracing::info_span!("discover_with_claude").entered();
-        let mut opts = discovery::Options::default();
+        // A person's own journeys ride along; everything else is discovered afresh.
+        let keep: Vec<atlas::Journey> = state.atlas().map(|l| l.atlas.journeys.iter().filter(|j| j.source == "user").cloned().collect()).unwrap_or_default();
+        let mut opts = discovery::Options { flows, keep, ..discovery::Options::default() };
         if let Some(m) = model {
             opts.model = m;
         }
@@ -162,10 +164,108 @@ pub fn do_discover(app: &AppHandle, model: Option<String>) -> anyhow::Result<Val
 }
 
 #[tauri::command]
-pub async fn discover_with_claude(app: AppHandle, state: State<'_, Arc<AppState>>, model: Option<String>) -> Res<Value> {
+pub async fn discover_with_claude(app: AppHandle, state: State<'_, Arc<AppState>>, model: Option<String>, flows: Option<Vec<discovery::FlowRequest>>) -> Res<Value> {
     state.count(&state.counters.ipc_calls);
     let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || do_discover(&app2, model)).await.map_err(err)?.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || do_discover(&app2, model, flows.unwrap_or_default())).await.map_err(err)?.map_err(err)
+}
+
+/// Install a checked atlas as the current one and save it next to the graph.
+fn install_atlas(state: &AppState, root: &Path, a: Atlas) -> anyhow::Result<()> {
+    cache::store_atlas(root, &a)?;
+    *state.atlas.write().unwrap() = Some(Arc::new(Loaded { atlas: a, stale: None }));
+    Ok(())
+}
+
+/// A person's journey lands in the atlas: the engine checks every message, and
+/// the atlas is saved so the edit outlives the session and the next discovery.
+pub fn do_save_journey(state: &AppState, mut j: atlas::Journey) -> anyhow::Result<Value> {
+    let graph = state.graph().ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
+    let l = state.atlas().ok_or_else(|| anyhow::anyhow!("no atlas loaded"))?;
+    j.source = "user".into();
+    for m in &mut j.messages {
+        if m.by.is_empty() {
+            m.by = "user".into();
+        }
+    }
+    let a = atlas::upsert_journey(&graph, &l.atlas, j);
+    tracing::info!(journeys = a.journeys.len(), "journey saved");
+    install_atlas(state, Path::new(&graph.root), a)?;
+    atlas_value(state).map_err(|e| anyhow::anyhow!(e))
+}
+
+#[tauri::command]
+pub fn save_journey(state: State<'_, Arc<AppState>>, journey: atlas::Journey) -> Res<Value> {
+    state.count(&state.counters.ipc_calls);
+    do_save_journey(&state, journey).map_err(err)
+}
+
+pub fn find_journey_id(a: &Atlas, q: &str) -> Option<String> {
+    let ql = q.to_lowercase();
+    a.journeys.iter().find(|j| j.id == q || j.name.to_lowercase() == ql || j.entry == q).map(|j| j.id.clone())
+}
+
+pub fn do_delete_journey(state: &AppState, q: &str) -> anyhow::Result<Value> {
+    let graph = state.graph().ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
+    let l = state.atlas().ok_or_else(|| anyhow::anyhow!("no atlas loaded"))?;
+    let id = find_journey_id(&l.atlas, q).ok_or_else(|| anyhow::anyhow!("no journey `{q}`"))?;
+    let a = atlas::remove_journey(&graph, &l.atlas, &id);
+    install_atlas(state, Path::new(&graph.root), a)?;
+    atlas_value(state).map_err(|e| anyhow::anyhow!(e))
+}
+
+#[tauri::command]
+pub fn delete_journey(state: State<'_, Arc<AppState>>, journey: String) -> Res<Value> {
+    state.count(&state.counters.ipc_calls);
+    do_delete_journey(&state, &journey).map_err(err)
+}
+
+/// One narrator, one journey. Progress arrives as `journey:started`, the agent's
+/// `discover:progress` events, then `journey:done` or `journey:error`.
+pub fn do_narrate_journey(app: &AppHandle, q: String, note: String, model: Option<String>) -> anyhow::Result<Value> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let graph = state.graph().ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
+    let l = state.atlas().ok_or_else(|| anyhow::anyhow!("no atlas loaded"))?;
+    if state.discovering.swap(true, Ordering::SeqCst) {
+        anyhow::bail!("a discovery is already running");
+    }
+    let id = find_journey_id(&l.atlas, &q).unwrap_or_else(|| atlas::journey_id(if q.contains('#') { &q } else { "" }, &q));
+    let _ = app.emit("journey:started", json!({ "journey": id, "note": note }));
+    let result = (|| {
+        let _span = tracing::info_span!("narrate_journey").entered();
+        let mut opts = discovery::Options::default();
+        if let Some(m) = model {
+            opts.model = m;
+        }
+        let root = Path::new(&graph.root);
+        let runner = discovery::claude_runner(root, &opts);
+        let progress = |p: discovery::Progress| {
+            let _ = app.emit("discover:progress", &p);
+        };
+        let (a, run) = discovery::narrate_one(&graph, &l.atlas, &q, &note, &opts, &runner, &progress)?;
+        let j = a.journeys.iter().find(|j| j.id == id).cloned();
+        tracing::info!(journey = %id, cost_usd = run.cost_usd, secs = run.secs, "journey narrated");
+        install_atlas(&state, root, a)?;
+        Ok::<_, anyhow::Error>(json!({ "run": run, "journey": j }))
+    })();
+    state.discovering.store(false, Ordering::SeqCst);
+    match &result {
+        Ok(v) => {
+            let _ = app.emit("journey:done", v);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "narration failed");
+            let _ = app.emit("journey:error", json!({ "journey": id, "error": e.to_string() }));
+        }
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn narrate_journey(app: AppHandle, state: State<'_, Arc<AppState>>, journey: String, note: Option<String>, model: Option<String>) -> Res<Value> {
+    state.count(&state.counters.ipc_calls);
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || do_narrate_journey(&app2, journey, note.unwrap_or_default(), model)).await.map_err(err)?.map_err(err)
 }
 
 /// Forget Claude's atlas and go back to the engine's.

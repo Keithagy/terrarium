@@ -3,11 +3,12 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, inTauri, log, on } from "./tauri";
-import { store, emit, select, setAtlas, setLevel, setJourney, setJourneyStep, zoomInto, zoomOut, snapshot, elementById } from "./store";
+import { store, emit, select, setAtlas, setLevel, setJourney, setJourneyStep, setView, startDraft, endDraft, zoomInto, zoomOut, snapshot, elementById } from "./store";
 import { initPanels, refreshRecent, setShelfTab, toast, toggleHelp, type Actions } from "./panels";
 import { initAtlas, goLevel } from "./atlas";
 import { initDiscovery } from "./discovery";
 import { initBridge } from "./bridge";
+import { initSequence } from "./sequence";
 import type { ScanDone } from "./types";
 
 // ---- actions ---------------------------------------------------------------------
@@ -79,7 +80,7 @@ async function scan(path: string, fresh: boolean): Promise<void> {
 // ---- keyboard ----------------------------------------------------------------------
 
 window.addEventListener("keydown", (e) => {
-  const inInput = (e.target as HTMLElement)?.tagName === "INPUT";
+  const inInput = ["INPUT", "TEXTAREA", "SELECT"].includes((e.target as HTMLElement)?.tagName);
   if (e.metaKey && e.key.toLowerCase() === "o") { e.preventDefault(); void actions.openRepo(); return; }
   if (e.metaKey && e.key.toLowerCase() === "k") { e.preventDefault(); (document.getElementById("search") as HTMLInputElement).focus(); return; }
   if (inInput || e.metaKey || e.ctrlKey) return;
@@ -101,11 +102,15 @@ window.addEventListener("keydown", (e) => {
       setShelfTab("journeys");
       break;
     }
+    case "s": case "S": if (store.journey) setView(store.view === "map" ? "sequence" : "map"); break;
+    case "e": case "E": if (store.journey && !store.draft && !store.narrating) startDraft(); break;
     case "f": case "F": document.getElementById("fit-btn")?.click(); break;
     case "r": case "R": if (store.repo) void scan(store.repo, true); break;
     case "?": toggleHelp(); break;
     case "Escape":
-      if (store.selection !== null || store.relSelection !== null) select(null);
+      if (!document.getElementById("plan")!.hidden) { document.getElementById("plan-cancel")?.click(); }
+      else if (store.draft) endDraft();
+      else if (store.selection !== null || store.relSelection !== null) select(null);
       else if (store.journey) setJourney(null);
       else if (store.notesOpen) { store.notesOpen = false; emit("discovery"); emit("ui"); }
       else toggleHelp(false);
@@ -163,6 +168,7 @@ setInterval(() => {
 
 initPanels(actions);
 initAtlas();
+initSequence();
 initDiscovery();
 initBridge(actions);
 setShelfTab("map");

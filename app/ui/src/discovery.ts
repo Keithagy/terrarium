@@ -4,7 +4,7 @@
 
 import { api, log, on } from "./tauri";
 import { store, subscribe, emit, freshDiscovery, setAtlas, setLevel, elementName, type AgentState, type Note } from "./store";
-import type { Atlas, DiscoveryRun, Progress } from "./types";
+import type { Atlas, DiscoveryRun, FlowRequest, NarrateDone, Progress } from "./types";
 import { esc, toast } from "./panels";
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T;
@@ -12,14 +12,33 @@ const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel)
 let ticker = 0;
 
 export function initDiscovery(): void {
-  $("#discover-btn").addEventListener("click", () => void runDiscovery());
+  $("#discover-btn").addEventListener("click", () => openPlan());
   $("#notes-close").addEventListener("click", () => { store.notesOpen = false; emit("discovery"); emit("ui"); });
   $("#notes-btn").addEventListener("click", () => { store.notesOpen = !store.notesOpen; emit("discovery"); emit("ui"); });
+  initPlan();
   subscribe("discovery", render);
   subscribe("atlas", render);
   void on<Record<string, never>>("discover:started", () => start(""));
   void on<Progress>("discover:progress", onProgress);
   void on<DiscoveryRun>("discover:done", onDone);
+  void on<{ journey: string; note: string }>("journey:started", (p) => { store.narrating = p.journey; emit("journey"); emit("atlas"); emit("ui"); });
+  void on<NarrateDone>("journey:done", (p) => {
+    store.narrating = null;
+    void reloadAtlas().then(() => {
+      const j = p.journey;
+      toast(j ? `Narrated “${j.name}”: ${j.messages.length} messages, ${j.messages.filter((m) => m.source === "claimed").length} claimed, for $${p.run.cost_usd.toFixed(2)}` : "Narrated", "ok", 6000);
+      log("info", "journey narrated", { cost_usd: p.run.cost_usd, secs: p.run.secs });
+      emit("journey");
+      emit("ui");
+    });
+  });
+  void on<{ journey: string; error: string }>("journey:error", (p) => {
+    store.narrating = null;
+    toast(`Narration failed: ${p.error}`, "error", 7000);
+    emit("journey");
+    emit("atlas");
+    emit("ui");
+  });
   void on<{ error: string }>("discover:error", (e) => {
     const d = store.discovery;
     d.running = false;
@@ -33,14 +52,90 @@ export function initDiscovery(): void {
   void on<Record<string, never>>("discover:reset", () => void reloadAtlas());
 }
 
-export async function runDiscovery(): Promise<void> {
+export async function runDiscovery(flows: FlowRequest[] = []): Promise<void> {
   if (store.discovery.running || !store.graphLoaded) return;
   start("");
   try {
-    await api.discoverWithClaude();
+    await api.discoverWithClaude(undefined, flows);
   } catch (e) {
     log("warn", `discovery failed: ${String(e)}`);
   }
+}
+
+// ---- the plan: what the person wants narrated, before anything is spent ----------------
+
+interface PlanRow {
+  entry: string;
+  name: string;
+  note: string;
+  on: boolean;
+}
+
+let plan: PlanRow[] = [];
+
+function initPlan(): void {
+  $("#plan-cancel").addEventListener("click", () => { $("#plan").hidden = true; emit("ui"); });
+  $("#plan").addEventListener("click", (e) => { if (e.target === $("#plan")) { $("#plan").hidden = true; emit("ui"); } });
+  $("#plan-add").addEventListener("click", () => addPlanRow());
+  $("#plan-new-name").addEventListener("keydown", (e) => { if (e.key === "Enter") addPlanRow(); });
+  $("#plan-run").addEventListener("click", () => {
+    const flows: FlowRequest[] = plan.filter((r) => r.on && (r.entry || r.name.trim())).map((r) => ({ entry: r.entry, name: r.name.trim(), note: r.note.trim() }));
+    $("#plan").hidden = true;
+    emit("ui");
+    log("info", "discovery planned", { flows: flows.length });
+    void runDiscovery(flows);
+  });
+}
+
+function addPlanRow(): void {
+  const name = $<HTMLInputElement>("#plan-new-name").value.trim();
+  if (!name) return;
+  plan.push({ entry: "", name, note: $<HTMLInputElement>("#plan-new-note").value.trim(), on: true });
+  $<HTMLInputElement>("#plan-new-name").value = "";
+  $<HTMLInputElement>("#plan-new-note").value = "";
+  renderPlan();
+}
+
+/** Open the plan sheet with the flows the atlas knows: what the scanner can trace, and what stands now. */
+export function openPlan(): void {
+  if (store.discovery.running || !store.graphLoaded) return;
+  const a = store.atlas;
+  if (!a) return;
+  plan = a.journeys.map((j) => ({ entry: j.entry, name: j.source === "engine" ? "" : j.name, note: j.note ?? "", on: j.source !== "engine" }));
+  renderPlan();
+  $("#plan").hidden = false;
+  emit("ui");
+}
+
+function renderPlan(): void {
+  const ul = $("#plan-flows");
+  ul.innerHTML = plan.map((r, i) => `
+    <li class="plan-flow${r.on ? " is-on" : ""}" data-testid="plan-flow-${i + 1}">
+      <label class="plan-check"><input type="checkbox" data-i="${i}" data-field="on" data-testid="plan-flow-${i + 1}-on" ${r.on ? "checked" : ""} /></label>
+      <div class="plan-fields">
+        <input type="text" data-i="${i}" data-field="name" data-testid="plan-flow-${i + 1}-name" value="${esc(r.name)}" placeholder="${esc(r.entry ? `What the user is doing (from ${r.entry})` : "What the user is doing")}" />
+        <input type="text" data-i="${i}" data-field="note" data-testid="plan-flow-${i + 1}-note" value="${esc(r.note)}" placeholder="Note for the narrator (optional)" />
+        ${r.entry ? `<span class="plan-entry mono">${esc(r.entry)}</span>` : `<span class="plan-entry">no trace: the narrator finds it in the code</span>`}
+      </div>
+      <button class="ghost is-round" data-remove="${i}" title="Remove">×</button>
+    </li>`).join("");
+  ul.querySelectorAll<HTMLInputElement>("[data-field]").forEach((inp) => inp.addEventListener("input", () => {
+    const r = plan[Number(inp.dataset.i)];
+    if (!r) return;
+    if (inp.dataset.field === "on") r.on = inp.checked;
+    else if (inp.dataset.field === "name") { r.name = inp.value; if (inp.value.trim()) r.on = true; }
+    else r.note = inp.value;
+    ul.querySelector(`[data-testid="plan-flow-${Number(inp.dataset.i) + 1}"]`)?.classList.toggle("is-on", r.on);
+    ul.querySelector<HTMLInputElement>(`[data-testid="plan-flow-${Number(inp.dataset.i) + 1}-on"]`)!.checked = r.on;
+    renderPlanSummary();
+  }));
+  ul.querySelectorAll<HTMLButtonElement>("[data-remove]").forEach((b) => b.addEventListener("click", () => { plan.splice(Number(b.dataset.remove), 1); renderPlan(); }));
+  renderPlanSummary();
+}
+
+function renderPlanSummary(): void {
+  const n = plan.filter((r) => r.on && (r.entry || r.name.trim())).length;
+  $("#plan-summary").textContent = n ? `${n} ${n === 1 ? "journey" : "journeys"} chosen by you` : "the surveyor will pick the journeys";
 }
 
 export async function resetAtlas(): Promise<void> {
@@ -88,6 +183,20 @@ function agentKey(role: string, target: string | null): string {
 
 function onProgress(p: Progress): void {
   const d = store.discovery;
+  // one narrator rewriting one journey is not a discovery: nothing to open, only a journey to refresh
+  if (store.narrating && !d.running) {
+    if (p.event === "journey_done") {
+      const a = store.atlas;
+      if (a) {
+        const i = a.journeys.findIndex((j) => j.id === p.journey.id);
+        if (i >= 0) a.journeys[i] = p.journey; else a.journeys.push(p.journey);
+        if (store.journey?.id === p.journey.id) store.journey = p.journey;
+        emit("atlas");
+        emit("journey");
+      }
+    }
+    return;
+  }
   if (!d.running) start("");
   switch (p.event) {
     case "started":

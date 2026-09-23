@@ -3,7 +3,7 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AtlasView, CacheEntry, NodeDetail, ScanDone } from "./types";
+import type { AtlasView, CacheEntry, FlowRequest, Journey, NodeDetail, ScanDone } from "./types";
 
 export const inTauri = isTauri();
 
@@ -22,8 +22,11 @@ export const api = {
   scanRepo: (path: string, fresh = false) => call<ScanDone>("scan_repo", { path, fresh }),
   getAtlas: () => call<AtlasView>("get_atlas"),
   atlasDsl: () => call<string>("atlas_dsl"),
-  discoverWithClaude: (model?: string) => call<unknown>("discover_with_claude", { model }),
+  discoverWithClaude: (model?: string, flows: FlowRequest[] = []) => call<unknown>("discover_with_claude", { model, flows }),
   resetAtlas: () => call<AtlasView>("reset_atlas"),
+  saveJourney: (journey: Journey) => call<AtlasView>("save_journey", { journey }),
+  deleteJourney: (journey: string) => call<AtlasView>("delete_journey", { journey }),
+  narrateJourney: (journey: string, note: string, model?: string) => call<unknown>("narrate_journey", { journey, note, model }),
   getNode: (id: number) => call<NodeDetail>("get_node", { id }),
   getFile: (path: string) => call<NodeDetail>("get_file", { path }),
   search: (q: string, limit = 30) => call<{ id: number; name: string; path: string; kind: string; lang: string; tags: string[] }[]>("search_nodes", { q, limit }),

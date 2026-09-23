@@ -5,10 +5,11 @@
 // one component's files.
 
 import { api, log } from "./tauri";
-import { store, subscribe, emit, select, selectRelationship, setHover, zoomInto, zoomOut, setLevel, elementById, shownContainers, containerOf, elementName, type Level } from "./store";
+import { store, subscribe, emit, select, selectRelationship, setHover, zoomInto, zoomOut, setLevel, elementById, shownContainers, containerOf, elementName, currentProjection, type Level } from "./store";
 import { layout, type LNode, type LEdge, type Layout } from "./layout";
 import { EXTERNAL_LABEL, KIND_LABEL, langOf, type Lang, type Relationship, type NodeDetail } from "./types";
 import { esc, prose, toast } from "./panels";
+import { sequenceShown } from "./sequence";
 
 const SVG = "http://www.w3.org/2000/svg";
 const XHTML = "http://www.w3.org/1999/xhtml";
@@ -64,7 +65,7 @@ export function initAtlas(): void {
   subscribe("level", () => { render(); renderCrumbs(); });
   subscribe("selection", () => { applyEmphasis(); renderCrumbs(); });
   subscribe("hover", applyEmphasis);
-  subscribe("journey", () => { applyEmphasis(); });
+  subscribe("journey", () => { showStage(); applyEmphasis(); });
   subscribe("discovery", renderLive);
   initPanZoom();
   document.querySelectorAll<HTMLButtonElement>("[data-level]").forEach((b) => b.addEventListener("click", () => goLevel(b.dataset.level as Level)));
@@ -171,6 +172,13 @@ function diagram(level: Level, focus: string | null): { nodes: DNode[]; edges: D
 
 // ---- rendering ---------------------------------------------------------------------------
 
+/** The sequence view sits over the map and the code page while a journey is shown that way. */
+function showStage(): void {
+  const seq = sequenceShown();
+  svg.classList.toggle("is-hidden", seq || store.level === "code");
+  $("#code-view").hidden = seq || store.level !== "code";
+}
+
 function render(): void {
   const stage = $("#stage");
   const code = $("#code-view");
@@ -180,13 +188,13 @@ function render(): void {
   lastLevelKey = levelKey;
   if (store.level === "code") {
     svg.classList.add("is-hidden");
-    code.hidden = false;
+    code.hidden = sequenceShown();
     void renderCode();
     stage.dataset.level = "code";
     return;
   }
   code.hidden = true;
-  svg.classList.remove("is-hidden");
+  svg.classList.toggle("is-hidden", sequenceShown());
   stage.dataset.level = store.level;
   const { nodes, edges } = diagram(store.level, store.focus);
   const lay = layout(
@@ -304,38 +312,26 @@ function el(tag: string, attrs: Record<string, string | number> = {}): SVGElemen
 
 // ---- emphasis: hover, selection, journey -------------------------------------------------
 
-/** Journey steps mapped onto the current diagram: edge key -> step numbers. */
+/** The journey's arrows at this level, mapped onto the diagram's edges: edge key -> step numbers.
+ * The same projection the sequence view draws, so the numbers agree between the two. */
 function journeyOnDiagram(): { edges: Map<string, number[]>; nodes: Set<string>; current: string | null; currentNode: string | null } {
   const out = { edges: new Map<string, number[]>(), nodes: new Set<string>(), current: null as string | null, currentNode: null as string | null };
-  const j = store.journey;
-  if (!j || !current) return out;
-  const c = store.level === "components" ? store.focus : null;
-  const map = (id: string): string | null => {
-    if (store.level === "context") return id.startsWith("x:") || id.startsWith("p:") ? id : "s";
-    if (store.level === "containers") return id.startsWith("x:") || id.startsWith("p:") ? id : (containerOf(id)?.id ?? null);
-    if (store.level === "components") {
-      if (id.startsWith("x:")) return id;
-      const cc = containerOf(id);
-      if (!cc) return null;
-      return cc.id === c ? (id.includes("/") ? id : null) : cc.id;
-    }
-    return null;
-  };
+  const p = store.journey ? currentProjection() : null;
+  if (!p || !current) return out;
   const keys = new Set(current.edges.map((e) => e.key));
-  j.steps.forEach((s, i) => {
-    const from = map(s.from);
-    const to = map(s.to);
-    if (!from || !to) return;
+  p.messages.forEach((m, i) => {
     if (store.journeyStep > 0 && i + 1 > store.journeyStep) return;
-    if (from === to) { out.nodes.add(from); if (store.journeyStep === i + 1) out.currentNode = from; return; }
-    const key = `${from}>${to}`;
-    if (!keys.has(key)) { if (store.journeyStep === i + 1) out.currentNode = to; return; }
-    out.nodes.add(from);
-    out.nodes.add(to);
-    const list = out.edges.get(key) ?? [];
+    // a return rides the arrow it answers; the map has no arrow the other way
+    const key = m.kind === "return" ? `${m.to}>${m.from}` : `${m.from}>${m.to}`;
+    const alt = m.kind === "return" ? `${m.from}>${m.to}` : `${m.to}>${m.from}`;
+    const k = keys.has(key) ? key : keys.has(alt) ? alt : null;
+    if (!k) { out.nodes.add(m.from); out.nodes.add(m.to); if (store.journeyStep === i + 1) out.currentNode = m.to; return; }
+    out.nodes.add(m.from);
+    out.nodes.add(m.to);
+    const list = out.edges.get(k) ?? [];
     list.push(i + 1);
-    out.edges.set(key, list);
-    if (store.journeyStep === i + 1) out.current = key;
+    out.edges.set(k, list);
+    if (store.journeyStep === i + 1) out.current = k;
   });
   return out;
 }

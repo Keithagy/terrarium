@@ -49,9 +49,35 @@ terrarium atlas                                  # containers and their relation
 terrarium atlas --level context                  # people and outside systems
 terrarium atlas --level components --container api
 terrarium atlas --dsl                            # Structurizr DSL
+terrarium atlas --journey j:web-src-app-ts-main  # one journey as a sequence: participants and messages at a level
+terrarium atlas --journey "Sign up" --level components --container api --mermaid
 terrarium discover                               # Claude discovers the atlas (spends money)
+terrarium discover --flow "web/src/app.ts#main :: watch the users list" --flow "Nightly cleanup"
+terrarium narrate "Sign up" --note "show the welcome email"   # one narrator rewrites one journey (spends money)
 terrarium discover --reset                       # back to the engine's atlas
 ```
+
+## Journeys and sequence diagrams
+
+A journey is a list of messages between atlas elements (a person, a container, a
+component, an outside system), kept at the finest grain. Every level is a projection
+of that one list: at the context level the components fold into the system, at the
+containers level into their containers, and at the components level the focused
+container opens up while the others stay whole. The map numbers the same arrows the
+sequence view draws, so the two always agree with the boxes.
+
+Each message carries `source` (what backs it: `code`, `survey`, or `claimed`) and `by`
+(who wrote it: `engine`, `claude`, or `user`). The check re-sources every message
+against the relationships the code backs, and a message that carries symbol paths
+follows its files when components are regrouped, so a journey survives a rediscovery.
+A journey's `source` says who last wrote it; a person's journeys (`user`) ride along
+untouched through `discover`.
+
+Steering: `--flow` chooses what the narrators follow (an entry the scanner traced, or a
+name the narrator must find in the code) with a note each; in the app the Discover
+button opens a plan sheet first. Editing: the sequence view's Edit drawer changes
+messages by hand (arrows are picked from the atlas's elements), and Narrate again sends
+one narrator with a note.
 
 ## Interacting with the app
 
@@ -61,6 +87,10 @@ terrarium app level components --focus "Users API"
 terrarium app level code --focus "HTTP routes"
 terrarium app select "Users API"                 # a container, component, person, external, or a file path
 terrarium app journey "Sign up" --step 3         # play a journey; --stop clears it
+terrarium app journey "Sign up" --sequence       # the same journey as a sequence diagram (--map goes back)
+terrarium app narrate "Sign up" --note "..."     # one narrator rewrites it in the app (blocks; spends money)
+terrarium app journey-save --file j.json         # put a journey (the shape `app atlas` prints) in, checked and saved
+terrarium app journey-delete "Sign up"
 terrarium app search fetch                       # types into the search box, returns the results
 terrarium app discover                           # Claude discovers the atlas in the app (blocks; spends money)
 terrarium app discover --reset
@@ -78,8 +108,17 @@ Every `data-testid` in the UI is listed by `terrarium app ui`. Stable ones:
 `notes-close`, `notes-reset`, `stage-survey|field|editor|verify`, `agent-<role>:<target>`,
 `card`, `card-title`, `card-path`, `card-zoom`, `card-close`, `rel-<from>><to>`,
 `nb-<element id>`, `code-title`, `files`, `file-<path>`, `open-<path>`, `journey-bar`,
-`journey-prev|next|all|close|range|title|count|caption`, `bridge`, `open-repo`,
+`journey-prev|next|all|close|range|title|count|caption|edit`, `journey-new`,
+`journey-<journey id>-sequence`, `view-map|sequence`, `sequence`, `seq-title`, `seq-source`,
+`seq-edit|narrate|mermaid|map`, `seq-note`, `seq-narrate-go`, `seq-<participant id>`,
+`msg-<n>`, `editor`, `ed-name|summary|note|add|save|cancel|delete`,
+`ed-msg-<n>-from|to|kind|label|caption|remove`, `plan`, `plan-flow-<n>-on|name|note`,
+`plan-new-name|note`, `plan-add|run|cancel|summary`, `bridge`, `open-repo`,
 `recent-repo`, `toast`.
+
+`terrarium app ui` also reports `sequence` (participants and messages drawn, with the
+current one) while the sequence view is on, and `view`, `editing` and `narrating` in the
+state.
 
 Element ids: `s` (the system), `p:<slug>` (a person), `x:<slug>` (an outside system),
 `c:<package slug>` (a container), `c:<package slug>/<component slug>` (a component),
@@ -114,7 +153,10 @@ model and `TERRARIUM_CLAUDE` to point at a `claude` binary or a stand-in. The ap
 `discover:progress` events (`started`, `stage`, `agent_started`, `agent_activity`,
 `agent_done`, `survey_done`, `container_done`, `journey_done`, `verified`) which the
 field notes panel renders; `terrarium app ui` reports `discovery` and `notes` while a
-run is on.
+run is on. `POST /discover` takes `flows` (`[{entry?, name?, note?}]`) to steer which
+journeys are narrated. One journey narrated again (`POST /journey/narrate`) emits
+`journey:started`, the agent's `discover:progress` events, then `journey:done` or
+`journey:error`.
 
 ## Debugging
 
@@ -136,7 +178,8 @@ run is on.
   `src/tags.rs`. Queries and traces: `src/query.rs`. Cache (graphs and saved atlases):
   `src/cache.rs`.
 - Atlas: `crates/terrarium-core/src/atlas.rs` (the C4 model, the engine's draft, the
-  check against the graph, journeys from traces, Structurizr export). Discovery:
+  check against the graph, journeys as messages from traces, their projection onto each
+  level, Structurizr and Mermaid export). Discovery:
   `src/discovery.rs` (survey, field, editor; prompts and schemas; the streaming
   `claude -p` runner; the runner is injectable, and `tests/discovery.rs` drives it with
   stand-ins).

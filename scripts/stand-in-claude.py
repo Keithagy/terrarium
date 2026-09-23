@@ -90,11 +90,23 @@ def container(prompt):
 
 
 def journey(prompt):
-    m = re.search(r"steps: ([\d, ]+)\.", prompt)
-    wanted = [int(x) for x in m.group(1).split(",")] if m else []
+    """Echo the engine's draft messages with captions, then a return for the last
+    call; with no draft, one message between the first two participants."""
     for path in re.findall(r"^\d+\. +(\S+?)(?::\d+)?(?: <-|\s|$)", prompt, re.M)[:4]:
-        read(path.split("#")[0])
-    return {"name": "Follow one request end to end", "summary": "A stand-in narrator followed the calls the scanner found. Each step below is one crossing or one place the data comes to rest.", "captions": [{"step": i, "caption": f"Step {i}: the call goes on, says the stand-in."} for i in wanted]}
+        if "/" in path:
+            read(path.split("#")[0])
+    draft = re.findall(r"^\d+\. (\S+) -> (\S+) \[(\w+)\] ([^(\n]*)", prompt, re.M)
+    participants = re.findall(r"^ *- (\S+) = ", prompt, re.M)
+    note = re.search(r"steering this atlas says: (.*)", prompt)
+    messages = [{"from": f, "to": t, "kind": k, "label": label.strip(), "caption": f"{label.strip()}: the call goes on, says the stand-in."} for f, t, k, label in draft]
+    if not messages and len(participants) >= 2:
+        messages = [{"from": participants[0], "to": participants[1], "kind": "call", "label": "starts it", "caption": "A stand-in guessed where this flow starts."}]
+    calls = [m for m in messages if m["kind"] in ("call", "flow")]
+    if calls:
+        last = calls[-1]
+        messages.append({"from": last["to"], "to": last["from"], "kind": "return", "label": "the answer", "caption": "The answer goes back, says the stand-in."})
+    name = "Follow one request end to end" if not note else f"Follow one request ({note.group(1).strip()[:24]})"
+    return {"name": name, "summary": "A stand-in narrator echoed the calls the scanner found. Each message is one crossing or one place the data comes to rest.", "messages": messages}
 
 
 def editor(prompt):

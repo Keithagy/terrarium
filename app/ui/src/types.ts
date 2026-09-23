@@ -123,12 +123,41 @@ export interface JourneyStep {
   caption: string;
 }
 
+export type MessageKind = "call" | "flow" | "store" | "return";
+export type Author = "engine" | "claude" | "user";
+
+/** One arrow on the sequence diagram, between two atlas element ids. */
+export interface Message {
+  from: string;
+  to: string;
+  label: string;
+  caption: string;
+  kind: MessageKind;
+  depth: number;
+  source: "code" | "survey" | "claimed" | "";
+  by: Author | "";
+  from_path?: string;
+  to_path?: string;
+}
+
 export interface Journey {
   id: string;
   name: string;
   summary: string;
   entry: string;
+  /** The source of truth: kept at the finest grain, projected onto each level. */
+  messages: Message[];
+  /** Component-grain steps for the map overlay; derived from `messages` by the check. */
   steps: JourneyStep[];
+  source: Author | "";
+  note?: string;
+}
+
+/** A flow the person asks the narrators to follow. */
+export interface FlowRequest {
+  entry: string;
+  name: string;
+  note: string;
 }
 
 export interface Pointer {
@@ -203,6 +232,8 @@ export type Progress =
   | { event: "container_done"; container: Container }
   | { event: "journey_done"; journey: Journey }
   | { event: "verified"; atlas: Atlas };
+
+export type NarrateDone = { run: DiscoveryRun; journey: Journey | null };
 
 export interface DiscoveryRun {
   model: string;

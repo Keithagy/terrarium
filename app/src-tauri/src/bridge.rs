@@ -103,8 +103,11 @@ fn describe() -> Value {
             { "method": "POST", "path": "/select",         "summary": "{element} select an atlas element (container, component, person, external, or a file path) and show it" },
             { "method": "POST", "path": "/search",         "summary": "{q} type into the search box" },
             { "method": "POST", "path": "/level",          "summary": "{level: context|containers|components|code, focus?} go to a diagram level (focus: a container or component id)" },
-            { "method": "POST", "path": "/journey",        "summary": "{journey?, step?} play a journey (id or name); omit journey to stop; step is 1-based" },
-            { "method": "POST", "path": "/discover",       "summary": "{model?} have Claude discover the atlas (survey, one agent per container and journey, editor); blocks until done" },
+            { "method": "POST", "path": "/journey",        "summary": "{journey?, step?, view?} play a journey (id or name); omit journey to stop; step is 1-based; view is map or sequence" },
+            { "method": "POST", "path": "/journey/save",   "summary": "{journey} put a journey (the shape /atlas prints) into the atlas, checked and saved" },
+            { "method": "POST", "path": "/journey/delete", "summary": "{journey} remove a journey (id or name)" },
+            { "method": "POST", "path": "/journey/narrate", "summary": "{journey, note?, model?} have Claude narrate one journey again; blocks until done" },
+            { "method": "POST", "path": "/discover",       "summary": "{model?, flows?: [{entry?, name?, note?}]} have Claude discover the atlas (survey, one agent per container and journey, editor); flows steer which journeys are narrated; blocks until done" },
             { "method": "POST", "path": "/discover/reset", "summary": "forget Claude's atlas and use the engine's" },
             { "method": "POST", "path": "/reset",          "summary": "context level, no selection, no journey, fit" },
             { "method": "GET",  "path": "/screenshot",     "summary": "PNG of the window (?format=json for a data URL)" },
@@ -173,6 +176,9 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/select", post(select))
         .route("/level", post(level))
         .route("/journey", post(journey))
+        .route("/journey/save", post(journey_save))
+        .route("/journey/delete", post(journey_delete))
+        .route("/journey/narrate", post(journey_narrate))
         .route("/discover", post(discover))
         .route("/discover/reset", post(discover_reset))
         .route("/reset", post(reset))
@@ -356,15 +362,55 @@ async fn journey(State(ctx): State<Ctx>, Json(body): Json<Value>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
+struct JourneySaveReq {
+    journey: terrarium_core::atlas::Journey,
+}
+
+async fn journey_save(State(ctx): State<Ctx>, Json(req): Json<JourneySaveReq>) -> ApiResult {
+    let v = commands::do_save_journey(&ctx.state, req.journey)?;
+    let _ = ctx.app.emit("discover:reset", json!({}));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    Ok(Json(json!({ "atlas": backend_state(&ctx)["atlas"], "journeys": v["atlas"]["journeys"].as_array().map(|js| js.iter().map(|j| json!({ "id": j["id"], "name": j["name"], "source": j["source"], "messages": j["messages"].as_array().map(|m| m.len()).unwrap_or(0) })).collect::<Vec<_>>()) })))
+}
+
+#[derive(Deserialize)]
+struct JourneyReq {
+    journey: String,
+    #[serde(default)]
+    note: String,
+    model: Option<String>,
+}
+
+async fn journey_delete(State(ctx): State<Ctx>, Json(req): Json<JourneyReq>) -> ApiResult {
+    commands::do_delete_journey(&ctx.state, &req.journey)?;
+    let _ = ctx.app.emit("discover:reset", json!({}));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    Ok(Json(json!({ "deleted": req.journey, "atlas": backend_state(&ctx)["atlas"] })))
+}
+
+/// Runs one narrator to completion, then waits for the UI to show the journey.
+async fn journey_narrate(State(ctx): State<Ctx>, Json(req): Json<JourneyReq>) -> ApiResult {
+    let app = ctx.app.clone();
+    let v = tauri::async_runtime::spawn_blocking(move || commands::do_narrate_journey(&app, req.journey, req.note, req.model))
+        .await
+        .map_err(|e| e.to_string())??;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let ui = ask_frontend(&ctx, "state", json!({}), 2000).await.unwrap_or(Value::Null);
+    Ok(Json(json!({ "run": v["run"], "journey": v["journey"], "ui": ui })))
+}
+
+#[derive(Deserialize)]
 struct DiscoverReq {
     model: Option<String>,
+    #[serde(default)]
+    flows: Vec<terrarium_core::discovery::FlowRequest>,
 }
 
 /// Runs the discovery agents to completion (minutes), then waits for the UI to show the new atlas.
 async fn discover(State(ctx): State<Ctx>, body: Option<Json<DiscoverReq>>) -> ApiResult {
     let app = ctx.app.clone();
-    let model = body.and_then(|b| b.0.model);
-    let run = tauri::async_runtime::spawn_blocking(move || commands::do_discover(&app, model))
+    let (model, flows) = body.map(|b| (b.0.model, b.0.flows)).unwrap_or((None, vec![]));
+    let run = tauri::async_runtime::spawn_blocking(move || commands::do_discover(&app, model, flows))
         .await
         .map_err(|e| e.to_string())??;
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;

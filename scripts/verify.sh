@@ -53,9 +53,16 @@ expect "atlas context" "Database \(DATABASE_URL\),database" "$T" --repo fixtures
 expect "atlas components" "Polyglot Api / Services,Queue \(REDIS_URL\),puts work on" "$T" --repo fixtures/polyglot atlas --level components --container polyglot-api
 expect "atlas dsl" "systemContext s" "$T" --repo fixtures/polyglot atlas --dsl
 
+step "cli journeys as sequences"
+expect "journey" "Polyglot Web,Polyglot Api,flow,http /api/users,code" "$T" --repo fixtures/polyglot atlas --journey j:web-src-app-ts-main
+expect "journey components" "Polyglot Web / Api,Polyglot Api" "$T" --repo fixtures/polyglot atlas --journey j:web-src-app-ts-main --level components --container polyglot-web
+expect "journey mermaid" "sequenceDiagram" "$T" --repo fixtures/polyglot atlas --journey j:web-src-app-ts-main --mermaid
+
 step "cli discover (stand-in claude, nothing spent)"
 expect "discover" "system: Polyglot Town" "$T" --repo fixtures/polyglot discover
 expect "discover check" "claimed" "$T" --repo fixtures/polyglot atlas
+expect "discover steered" "\"j:nightly-cleanup\",Follow one request \(there is no trace\)" "$T" --repo fixtures/polyglot discover --flow "web/src/app.ts#main :: watch the users list" --flow "Nightly cleanup :: there is no trace"
+expect "narrate" "source: claude" "$T" --repo fixtures/polyglot narrate j:web-src-app-ts-main --note "say more"
 expect "discover reset" "reset to the engine's atlas" "$T" --repo fixtures/polyglot discover --reset
 
 step "launch app"
@@ -75,12 +82,33 @@ expect "code" "level: code" "$T" app level code --focus "c:polyglot-api/services
 expect "code ui" "code-title" "$T" app ui
 expect "journey" "journey_step: 2" "$T" app journey "j:web-src-app-ts-main" --step 2
 expect "journey ui" "journey-caption" "$T" app ui
+expect "sequence" "view: sequence" "$T" app journey "j:web-src-app-ts-main" --sequence
+expect "sequence ui" "seq-c:polyglot-web" "$T" app ui
+expect "sequence components" "level: components" "$T" app level components --focus polyglot-web
+expect "sequence components ui" "seq-c:polyglot-web/api" "$T" app ui
+expect "sequence msg" "msg-1" "$T" app ui
 expect "reset" "journey: null" "$T" app reset
 
+step "edit a journey in the app"
+cat > "$OUT/journey.json" <<'JSON'
+{ "id": "j:mine", "name": "My own journey", "summary": "Written by hand.", "entry": "", "source": "user", "note": "",
+  "messages": [
+    { "from": "p:user", "to": "c:polyglot-web/app", "label": "opens the page", "caption": "The user opens the page.", "kind": "call", "depth": 0, "source": "", "by": "user" },
+    { "from": "c:polyglot-web/api", "to": "c:polyglot-api/core", "label": "GET /api/users", "caption": "The page asks for users.", "kind": "flow", "depth": 1, "source": "", "by": "user" },
+    { "from": "c:polyglot-api/core", "to": "c:worker", "label": "pings", "caption": "Not in the code.", "kind": "call", "depth": 1, "source": "", "by": "user" }
+  ], "steps": [] }
+JSON
+expect "journey save" "\"j:mine\",My own journey,user,3" "$T" app journey-save --file "$OUT/journey.json"
+expect "journey saved seq" "GET /api/users,code" "$T" app journey "j:mine" --sequence
+expect "journey claimed" "pings,claimed" "$T" app journey "j:mine" --sequence
+expect "journey delete" "deleted: \"?j:mine" "$T" app journey-delete j:mine
+"$T" app reset > /dev/null
+
 step "discover in the app (stand-in claude)"
-expect "app discover" "backed: 2[0-9]" "$T" app discover
+expect "app discover" "backed: 2[0-9]" "$T" app discover --flow "web/src/app.ts#main :: watch the users list"
 expect "discovered" "discovered by" "$T" app ui
 expect "notes" "Field notes" "$T" app ui
+expect "app narrate" "source: claude" "$T" app narrate j:web-src-app-ts-main --note "say more"
 expect "app reset atlas" "source: engine" "$T" app discover --reset
 
 step "bridge checks"

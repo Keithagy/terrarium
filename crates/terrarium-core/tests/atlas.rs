@@ -80,10 +80,83 @@ fn journeys_follow_the_traces_across_components() {
     assert_eq!(a.journeys.len(), 3);
     let j = &a.journeys[0];
     assert_eq!(j.entry, "web/src/app.ts#main");
+    assert_eq!(j.source, "engine");
     assert!(j.steps.iter().any(|s| s.from == "c:polyglot-web/api" && s.to == "c:polyglot-api/core" && s.label == "http /api/users"), "{:#?}", j.steps);
     assert!(j.steps.iter().any(|s| s.to.starts_with("x:database")), "sinks point at the external: {:#?}", j.steps);
     assert!(a.guide.start_here.iter().any(|p| p.element == "c:polyglot-web"));
     assert!(a.guide.callouts.iter().any(|c| c.title.contains("/api/reports")), "{:#?}", a.guide.callouts);
+    // the sequence: a person starts it, every arrow joins two atlas elements, and each is sourced
+    let m0 = &j.messages[0];
+    assert_eq!((m0.from.as_str(), m0.to.as_str(), m0.source.as_str(), m0.kind.as_str()), ("p:user", "c:polyglot-web/app", "survey", "call"));
+    let http = j.messages.iter().find(|m| m.label == "http /api/users").unwrap();
+    assert_eq!((http.from.as_str(), http.to.as_str(), http.kind.as_str(), http.source.as_str(), http.by.as_str()), ("c:polyglot-web/api", "c:polyglot-api/core", "flow", "code", "engine"));
+    assert_eq!(http.from_path, "web/src/api.ts#fetchUsers");
+    assert!(j.messages.iter().any(|m| m.kind == "store" && m.to.starts_with("x:database")), "{:#?}", j.messages);
+    assert!(j.messages.iter().all(|m| m.from != m.to));
+    assert_eq!(j.steps.len(), j.messages.iter().filter(|m| !m.from.starts_with("p:")).count(), "the map's steps are the messages minus the person's");
+}
+
+#[test]
+fn a_journey_projects_onto_every_level_and_tallies_with_the_boxes() {
+    let g = fixture();
+    let a = atlas::engine_atlas(&g);
+    let j = &a.journeys[0];
+    let ids: std::collections::HashSet<String> = a.containers.iter().flat_map(|c| std::iter::once(c.id.clone()).chain(c.components.iter().map(|k| k.id.clone()))).chain(a.people.iter().map(|p| p.id.clone())).chain(a.externals.iter().map(|x| x.id.clone())).collect();
+    // context: the person, the system, the outside systems
+    let ctx = atlas::project(&a, j, "context", None);
+    assert!(ctx.participants.contains(&"p:user".to_string()) && ctx.participants.contains(&"s".to_string()), "{:?}", ctx.participants);
+    assert!(ctx.participants.iter().all(|p| p == "s" || ids.contains(p)));
+    assert!(ctx.messages.iter().all(|m| m.from != m.to));
+    // containers: every participant is a container, a person or an outside system
+    let cont = atlas::project(&a, j, "containers", None);
+    assert!(cont.participants.iter().all(|p| ids.contains(p) && !p.contains('/')), "{:?}", cont.participants);
+    assert!(cont.messages.iter().any(|m| m.from == "c:polyglot-web" && m.to == "c:polyglot-api"), "{:#?}", cont.messages);
+    assert!(cont.messages.len() < j.messages.len(), "inside-a-container messages fold away");
+    // components of the web app: its components open up, other containers stay whole
+    let comp = atlas::project(&a, j, "components", Some("c:polyglot-web"));
+    assert!(comp.participants.iter().any(|p| p.starts_with("c:polyglot-web/")), "{:?}", comp.participants);
+    assert!(comp.participants.iter().filter(|p| p.starts_with("c:polyglot-api")).all(|p| !p.contains('/')), "{:?}", comp.participants);
+    assert!(comp.messages.iter().all(|m| m.n >= 1 && m.n <= j.messages.len()));
+    // mermaid
+    let mm = atlas::to_mermaid(&a, j, "containers", None);
+    assert!(mm.starts_with("sequenceDiagram\n"));
+    assert!(mm.contains("actor p_user as User"));
+    assert!(mm.contains("c_polyglot_web ->> c_polyglot_api: http /api/users"), "{mm}");
+}
+
+#[test]
+fn edited_journeys_are_checked_and_follow_their_files_when_components_move() {
+    let g = fixture();
+    let a = atlas::engine_atlas(&g);
+    let mut j = a.journeys[0].clone();
+    // a person adds an arrow the code backs, one it does not, and a return
+    j.source = "user".into();
+    j.note = "show the worker too".into();
+    j.messages.push(atlas::Message { from: "c:polyglot-api/core".into(), to: "c:worker".into(), label: "asks for jobs".into(), caption: "The API asks the worker.".into(), kind: "call".into(), depth: 1, source: String::new(), by: "user".into(), from_path: String::new(), to_path: String::new() });
+    j.messages.push(atlas::Message { from: "c:polyglot-api/core".into(), to: "c:polyglot-web/api".into(), label: "user list".into(), caption: "The users come back.".into(), kind: "return".into(), depth: 1, source: String::new(), by: "user".into(), from_path: String::new(), to_path: String::new() });
+    j.messages.push(atlas::Message { from: "c:polyglot-web/api".into(), to: "x:nowhere".into(), label: "".into(), caption: "".into(), kind: "call".into(), depth: 0, source: String::new(), by: "user".into(), from_path: String::new(), to_path: String::new() });
+    let v = atlas::upsert_journey(&g, &a, j);
+    let j = v.journeys.iter().find(|x| x.id == "j:web-src-app-ts-main").unwrap();
+    assert_eq!((j.source.as_str(), j.note.as_str()), ("user", "show the worker too"));
+    let claim = j.messages.iter().find(|m| m.to == "c:worker").unwrap();
+    assert_eq!((claim.source.as_str(), claim.by.as_str()), ("claimed", "user"));
+    let ret = j.messages.iter().find(|m| m.kind == "return").unwrap();
+    assert_eq!(ret.source, "code", "a return of a backed call is backed");
+    assert!(j.messages.iter().all(|m| m.to != "x:nowhere"));
+    assert!(v.report.notes.iter().any(|n| n.contains("dropped 1 message")), "{:?}", v.report.notes);
+    // the web app is regrouped: the message that carried a path follows its file into the new component
+    let mut b = v.clone();
+    let web = b.containers.iter_mut().find(|c| c.package == "polyglot-web").unwrap();
+    web.components = vec![Component { id: String::new(), name: "Everything".into(), description: "All of it.".into(), technology: String::new(), responsibilities: vec![], files: vec!["web/src/app.ts".into(), "web/src/api.ts".into(), "web/src/view.ts".into()] }];
+    let w = atlas::verify(&g, &b, None);
+    let j = w.journeys.iter().find(|x| x.id == "j:web-src-app-ts-main").unwrap();
+    let http = j.messages.iter().find(|m| m.label == "http /api/users").unwrap();
+    assert_eq!(http.from, "c:polyglot-web/everything");
+    assert_eq!(http.source, "code");
+    assert!(j.messages.iter().all(|m| m.from != m.to));
+    // removing it leaves the other journeys
+    let r = atlas::remove_journey(&g, &w, "j:web-src-app-ts-main");
+    assert_eq!(r.journeys.len(), 2);
 }
 
 #[test]

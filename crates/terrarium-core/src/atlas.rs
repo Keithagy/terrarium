@@ -136,16 +136,68 @@ pub struct Evidence {
     pub line: Option<u32>,
 }
 
-/// One thing the system does end to end, as a numbered path across the diagrams.
+/// One thing the system does end to end: a sequence of messages between atlas
+/// elements, which the diagrams show as a numbered path (the map) or as a sequence
+/// diagram (lifelines). Messages are kept at the finest grain the atlas has
+/// (components, people, outside systems); every level of the atlas is a projection
+/// of the same messages, so the sequence diagram always tallies with the boxes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Journey {
-    /// `j:<slug of entry>`
+    /// `j:<slug of entry>`, or `j:<slug of name>` for a journey with no trace.
     pub id: String,
     pub name: String,
     pub summary: String,
-    /// Entry symbol path (`web/src/app.ts#main`).
+    /// Entry symbol path (`web/src/app.ts#main`); empty when the journey was named, not traced.
+    #[serde(default)]
     pub entry: String,
+    /// The messages, in order. The source of truth.
+    #[serde(default)]
+    pub messages: Vec<Message>,
+    /// The messages at component grain, for the map overlay and the DSL. Derived from `messages` by the check.
+    #[serde(default)]
     pub steps: Vec<JourneyStep>,
+    /// Who wrote the journey last: `engine`, `claude` or `user`.
+    #[serde(default)]
+    pub source: String,
+    /// What the person steering the atlas asked for, if anything; narrators read it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// One arrow on the sequence diagram.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Message {
+    /// Element ids: a person, a container, a component, or an outside system.
+    pub from: String,
+    pub to: String,
+    /// Short words on the arrow: `http /api/users`, `calls fetchUsers`, `reads and writes`.
+    pub label: String,
+    /// One plain sentence: what happens and what is carried across.
+    pub caption: String,
+    /// `call` (inside the system), `flow` (crosses a language or process boundary),
+    /// `store` (data comes to rest in an outside system), `return` (an answer going back).
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Call depth from the trace; the sequence diagram nests activations by it.
+    #[serde(default)]
+    pub depth: u32,
+    /// What backs it: `code` (a trace or a backed relationship), `survey` (a person or an
+    /// outside system the survey declared), or `claimed` (an agent or a person asserted it).
+    #[serde(default)]
+    pub source: String,
+    /// Who wrote it: `engine`, `claude` or `user`.
+    #[serde(default)]
+    pub by: String,
+    /// Symbol paths behind the arrow, when the engine found them. The check re-resolves
+    /// `from` and `to` through these when components are regrouped.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to_path: String,
+}
+
+fn default_kind() -> String {
+    "call".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -158,6 +210,30 @@ pub struct JourneyStep {
     /// `calls`, or a flow label (`http /api/users`), or a sink (`db`).
     pub label: String,
     pub caption: String,
+}
+
+/// A journey projected onto one level of the atlas: the participants that appear
+/// at that level and the messages between them, in order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Projection {
+    pub level: String,
+    /// Element ids in order of first appearance (`s` stands for the system at the context level).
+    pub participants: Vec<String>,
+    pub messages: Vec<ProjectedMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectedMessage {
+    /// 1-based index of the first journey message behind this arrow.
+    pub n: usize,
+    pub from: String,
+    pub to: String,
+    pub label: String,
+    pub caption: String,
+    pub kind: String,
+    pub depth: u32,
+    pub source: String,
+    pub by: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -609,50 +685,157 @@ fn engine_summary(g: &Graph, containers: &[Container]) -> String {
 /// The engine's journeys: the longest traces, with captions made from the graph.
 pub fn engine_journeys(g: &Graph, atlas: &Atlas, limit: usize) -> Vec<Journey> {
     let traces = query::traces(g);
-    traces.iter().take(limit).filter_map(|t| journey_from_trace(atlas, t, None)).collect()
+    traces.iter().take(limit).filter_map(|t| engine_journey(atlas, t)).collect()
 }
 
-/// Turn a trace into journey steps over the atlas's components. Each step is a
-/// boundary crossing (a flow), plus the first call from the entry and each sink.
-pub fn journey_from_trace(atlas: &Atlas, t: &query::Trace, words: Option<(&str, &str, &HashMap<usize, String>)>) -> Option<Journey> {
+pub fn journey_id(entry: &str, name: &str) -> String {
+    format!("j:{}", slug(if entry.is_empty() { name } else { entry }))
+}
+
+/// The engine's journey for a trace: its messages, with words made from the graph.
+pub fn engine_journey(atlas: &Atlas, t: &query::Trace) -> Option<Journey> {
+    let messages = messages_from_trace(atlas, t);
+    if messages.is_empty() {
+        return None;
+    }
+    let mut j = Journey {
+        id: journey_id(&t.entry_path, ""),
+        name: format!("From {}", t.name),
+        summary: format!("Starts at {} and crosses {} {} through {}.", t.entry_path, t.hops, if t.hops == 1 { "boundary" } else { "boundaries" }, t.lanes.join(", ")),
+        entry: t.entry_path.clone(),
+        messages,
+        steps: vec![],
+        source: "engine".into(),
+        note: String::new(),
+    };
+    j.steps = steps_of(&j.messages);
+    Some(j)
+}
+
+/// The messages a trace shows, over the atlas's components. A call inside one
+/// component is not a message; a change of component or a boundary crossing is,
+/// and so is each place the data comes to rest. When a person uses the container
+/// the trace starts in, the first message is theirs.
+pub fn messages_from_trace(atlas: &Atlas, t: &query::Trace) -> Vec<Message> {
     let comp_of = component_index(atlas);
     let elem = |path: &str| -> Option<String> {
         let file = path.split('#').next().unwrap_or(path);
         comp_of.get(file).cloned()
     };
-    let mut steps: Vec<JourneyStep> = Vec::new();
+    let mut out: Vec<Message> = Vec::new();
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
-    for (i, s) in t.steps.iter().enumerate() {
+    if let Some(entry) = t.steps.first()
+        && let Some(first) = elem(&entry.path)
+    {
+        let cid = container_of_component(&first).to_string();
+        if let Some(r) = atlas.relationships.iter().find(|r| r.from.starts_with("p:") && r.to == cid) {
+            out.push(Message { from: r.from.clone(), to: first.clone(), label: r.label.clone(), caption: format!("{} {} {}.", element_name(atlas, &r.from), r.label, element_name(atlas, &cid)), kind: "call".into(), depth: 0, source: "survey".into(), by: "engine".into(), from_path: String::new(), to_path: entry.path.clone() });
+        }
+    }
+    for s in t.steps.iter() {
         let Some(parent) = s.parent else { continue };
         let p = &t.steps[parent];
         let crossing = s.via == Some(EdgeKind::Flow);
         let (Some(from), Some(to)) = (elem(&p.path), elem(&s.path)) else { continue };
-        // A call inside one component is not a step; a crossing or a change of component is.
         if (crossing || from != to) && seen.insert((from.clone(), to.clone(), if crossing { s.label.clone().unwrap_or_default() } else { String::new() })) {
-            let label = if crossing { s.label.clone().unwrap_or_else(|| "flow".into()) } else { "calls".into() };
-            let caption = words.and_then(|(_, _, caps)| caps.get(&i).cloned()).unwrap_or_else(|| engine_caption(p, s, crossing));
-            steps.push(JourneyStep { from: from.clone(), to: to.clone(), from_path: p.path.clone(), to_path: s.path.clone(), label, caption });
+            let label = if crossing { s.label.clone().unwrap_or_else(|| "flow".into()) } else { format!("calls {}", s.name) };
+            out.push(Message { from: from.clone(), to: to.clone(), label, caption: engine_caption(p, s, crossing), kind: if crossing { "flow".into() } else { "call".into() }, depth: p.depth, source: "code".into(), by: "engine".into(), from_path: p.path.clone(), to_path: s.path.clone() });
         }
-        // A sink is where the data comes to rest: point at the external it touches, once.
         if !s.sinks.is_empty()
             && let Some(x) = sink_external(atlas, &s.sinks)
             && seen.insert((to.clone(), x.id.clone(), "sink".into()))
         {
-            let caption = words.and_then(|(_, _, caps)| caps.get(&i).cloned()).filter(|_| from == to).unwrap_or_else(|| format!("{} {} {}.", s.name, sink_verb(&s.sinks), x.name));
-            steps.push(JourneyStep { from: to.clone(), to: x.id.clone(), from_path: s.path.clone(), to_path: x.name.clone(), label: s.sinks.join(", "), caption });
+            out.push(Message { from: to.clone(), to: x.id.clone(), label: sink_verb(&s.sinks).into(), caption: format!("{} {} {}.", s.name, sink_verb(&s.sinks), x.name), kind: "store".into(), depth: s.depth, source: "code".into(), by: "engine".into(), from_path: s.path.clone(), to_path: String::new() });
         }
     }
-    if steps.is_empty() {
+    out
+}
+
+/// The map's steps: every message except a person's, which the map has no arrow for.
+pub fn steps_of(messages: &[Message]) -> Vec<JourneyStep> {
+    messages
+        .iter()
+        .filter(|m| !m.from.starts_with("p:") && !m.to.starts_with("p:") && m.kind != "return")
+        .map(|m| JourneyStep { from: m.from.clone(), to: m.to.clone(), from_path: m.from_path.clone(), to_path: m.to_path.clone(), label: m.label.clone(), caption: m.caption.clone() })
+        .collect()
+}
+
+/// The name of any element, for prose.
+pub fn element_name(a: &Atlas, id: &str) -> String {
+    if id == "s" {
+        return a.system.name.clone();
+    }
+    for c in &a.containers {
+        if c.id == id {
+            return c.name.clone();
+        }
+        if let Some(k) = c.components.iter().find(|k| k.id == id) {
+            return k.name.clone();
+        }
+    }
+    a.people
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.name.clone())
+        .or_else(|| a.externals.iter().find(|x| x.id == id).map(|x| x.name.clone()))
+        .or_else(|| a.journeys.iter().find(|j| j.id == id).map(|j| j.name.clone()))
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// Where an element sits at a level: itself, its container, or the system.
+/// `None` when it has no box at that level (a component of a container that is
+/// not the focus collapses to that container; a hidden container is not drawn).
+pub fn at_level(a: &Atlas, id: &str, level: &str, focus: Option<&str>) -> Option<String> {
+    if id.starts_with("p:") || id.starts_with("x:") {
+        return Some(id.to_string());
+    }
+    let cid = container_of_component(id).to_string();
+    let c = a.containers.iter().find(|c| c.id == cid)?;
+    if c.hidden {
         return None;
     }
-    let (name, summary) = match words {
-        Some((n, s, _)) => (n.to_string(), s.to_string()),
-        None => (
-            format!("From {}", t.name),
-            format!("Starts at {} and crosses {} {} through {}.", t.entry_path, t.hops, if t.hops == 1 { "boundary" } else { "boundaries" }, t.lanes.join(", ")),
-        ),
-    };
-    Some(Journey { id: format!("j:{}", slug(&t.entry_path)), name, summary, entry: t.entry_path.clone(), steps })
+    match level {
+        "context" => Some("s".into()),
+        "containers" => Some(cid),
+        _ => {
+            if focus.is_some_and(|f| f == cid) {
+                if id.contains('/') { Some(id.to_string()) } else { c.components.first().map(|k| k.id.clone()) }
+            } else {
+                Some(cid)
+            }
+        }
+    }
+}
+
+/// Project a journey onto one level. Messages that fall inside one box vanish;
+/// consecutive messages that collapse onto the same arrow merge into one.
+pub fn project(a: &Atlas, j: &Journey, level: &str, focus: Option<&str>) -> Projection {
+    let mut participants: Vec<String> = Vec::new();
+    let mut messages: Vec<ProjectedMessage> = Vec::new();
+    for (i, m) in j.messages.iter().enumerate() {
+        let (Some(from), Some(to)) = (at_level(a, &m.from, level, focus), at_level(a, &m.to, level, focus)) else { continue };
+        if from == to {
+            continue;
+        }
+        if let Some(last) = messages.last_mut()
+            && last.from == from
+            && last.to == to
+            && last.kind == m.kind
+            && (last.label == m.label || level != "components")
+        {
+            if !last.label.contains(&m.label) && last.label.split(", ").count() < 3 {
+                last.label = format!("{}, {}", last.label, m.label);
+            }
+            continue;
+        }
+        for p in [&from, &to] {
+            if !participants.contains(p) {
+                participants.push(p.clone());
+            }
+        }
+        messages.push(ProjectedMessage { n: i + 1, from, to, label: m.label.clone(), caption: m.caption.clone(), kind: m.kind.clone(), depth: m.depth, source: m.source.clone(), by: m.by.clone() });
+    }
+    Projection { level: level.into(), participants, messages }
 }
 
 fn sink_external<'a>(atlas: &'a Atlas, sinks: &[String]) -> Option<&'a External> {
@@ -993,12 +1176,21 @@ fn verify_into(g: &Graph, f: &Facts, a: &mut Atlas, claims: Option<&Words>) {
     }
     rels.sort_by(|x, y| x.level.cmp(&y.level).then_with(|| x.from.cmp(&y.from)).then_with(|| x.to.cmp(&y.to)));
     a.relationships = rels;
-    // Journeys and the guide must point at things that exist.
+    // Journeys: every message must join two elements that exist. A message that
+    // carries symbol paths follows its files when components are regrouped, so a
+    // sequence diagram survives a rediscovery; its source is re-checked against the
+    // relationships the code backs.
     let comp_of = component_index(a);
+    let rels = a.relationships.clone();
+    let mut seen_j: HashSet<String> = HashSet::new();
     for j in &mut a.journeys {
-        j.steps.retain(|s| ids.contains(&s.from) && ids.contains(&s.to));
+        if j.source.is_empty() {
+            j.source = "engine".into();
+        }
+        check_messages(&mut j.messages, &ids, &comp_of, &rels, &mut notes, &j.name);
+        j.steps = steps_of(&j.messages);
     }
-    a.journeys.retain(|j| !j.steps.is_empty());
+    a.journeys.retain(|j| !j.messages.is_empty() && seen_j.insert(j.id.clone()));
     a.guide.start_here.retain(|p| ids.contains(&p.element) || a.journeys.iter().any(|j| j.id == p.element));
     for c in &mut a.guide.callouts {
         if let Some(e) = &c.element
@@ -1007,7 +1199,6 @@ fn verify_into(g: &Graph, f: &Facts, a: &mut Atlas, claims: Option<&Words>) {
             c.element = comp_of.get(e).cloned();
         }
     }
-    let _ = &comp_of;
     a.report = Report {
         backed: a.relationships.iter().filter(|r| r.source == "code").count() as u32,
         survey: a.relationships.iter().filter(|r| r.source == "survey").count() as u32,
@@ -1015,6 +1206,65 @@ fn verify_into(g: &Graph, f: &Facts, a: &mut Atlas, claims: Option<&Words>) {
         unplaced,
         notes,
     };
+}
+
+/// Re-resolve, drop and re-source a journey's messages against the atlas.
+fn check_messages(messages: &mut Vec<Message>, ids: &HashSet<String>, comp_of: &HashMap<String, String>, rels: &[Relationship], notes: &mut Vec<String>, journey: &str) {
+    let resolve = |id: &str, path: &str| -> Option<String> {
+        if !path.is_empty()
+            && !id.starts_with("p:")
+            && !id.starts_with("x:")
+            && let Some(k) = comp_of.get(path.split('#').next().unwrap_or(path))
+        {
+            return Some(k.clone());
+        }
+        ids.contains(id).then(|| id.to_string())
+    };
+    let before = messages.len();
+    let mut kept: Vec<Message> = Vec::new();
+    for m in messages.drain(..) {
+        let (Some(from), Some(to)) = (resolve(&m.from, &m.from_path), resolve(&m.to, &m.to_path)) else { continue };
+        if from == to {
+            continue;
+        }
+        let mut m = m;
+        m.from = from;
+        m.to = to;
+        if !matches!(m.kind.as_str(), "call" | "flow" | "store" | "return") {
+            m.kind = "call".into();
+        }
+        if m.by.is_empty() {
+            m.by = "engine".into();
+        }
+        m.source = message_source(&m, &kept, rels);
+        kept.push(m);
+    }
+    if kept.len() < before {
+        notes.push(format!("`{journey}`: dropped {} message(s) between elements that no longer exist.", before - kept.len()));
+    }
+    *messages = kept;
+}
+
+/// What backs a message: the code (a trace, or a relationship the code backs, at
+/// component or container grain), the survey (a person, or an outside system the
+/// survey declared), or nothing but the author's word.
+fn message_source(m: &Message, earlier: &[Message], rels: &[Relationship]) -> String {
+    let (from, to) = if m.kind == "return" { (&m.to, &m.from) } else { (&m.from, &m.to) };
+    if m.kind == "return" && earlier.iter().any(|e| &e.from == from && &e.to == to && e.kind != "return") {
+        return "code".into();
+    }
+    let (cf, ct) = (container_of_component(from), container_of_component(to));
+    let find = |a: &str, b: &str| rels.iter().find(|r| r.from == a && r.to == b).map(|r| r.source.clone());
+    if let Some(s) = find(from, to).or_else(|| find(cf, ct)) {
+        return if s == "claimed" { "claimed".into() } else { s };
+    }
+    if !m.from_path.is_empty() && !m.to_path.is_empty() && m.by == "engine" {
+        return "code".into();
+    }
+    if from.starts_with("p:") {
+        return "survey".into();
+    }
+    "claimed".into()
 }
 
 fn push_evidence(r: &mut Relationship, e: &Evidence) {
@@ -1172,12 +1422,37 @@ pub fn to_dsl(a: &Atlas) -> String {
     }
     for j in &a.journeys {
         s.push_str(&format!("        dynamic s {} {} {{\n", dsl_id(&j.id), dsl_str(&j.name)));
-        for st in &j.steps {
-            s.push_str(&format!("            {} -> {} {}\n", dsl_id(container_of_component(&st.from)), dsl_id(container_of_component(&st.to)), dsl_str(&st.caption)));
+        for m in project(a, j, "containers", None).messages.iter().filter(|m| m.kind != "return") {
+            s.push_str(&format!("            {} -> {} {}\n", dsl_id(&m.from), dsl_id(&m.to), dsl_str(&m.caption)));
         }
         s.push_str("            autolayout tb\n        }\n");
     }
     s.push_str("        styles {\n            element \"Person\" { shape person }\n            element \"database\" { shape cylinder }\n            element \"queue\" { shape pipe }\n        }\n    }\n}\n");
+    s
+}
+
+/// One journey at one level as a Mermaid sequence diagram, for pasting into a
+/// README or a pull request. Claimed messages are marked.
+pub fn to_mermaid(a: &Atlas, j: &Journey, level: &str, focus: Option<&str>) -> String {
+    let p = project(a, j, level, focus);
+    let mut s = String::from("sequenceDiagram\n");
+    s.push_str(&format!("    %% {}: {}\n", j.name, j.summary));
+    for id in &p.participants {
+        let kind = if id.starts_with("p:") { "actor" } else { "participant" };
+        s.push_str(&format!("    {kind} {} as {}\n", dsl_id(id), element_name(a, id).replace('"', "'")));
+    }
+    for m in &p.messages {
+        let arrow = match m.kind.as_str() {
+            "return" => "-->>",
+            "store" => "->>",
+            _ => "->>",
+        };
+        let mark = match m.source.as_str() {
+            "claimed" => " (claimed)",
+            _ => "",
+        };
+        s.push_str(&format!("    {} {arrow} {}: {}{mark}\n", dsl_id(&m.from), dsl_id(&m.to), m.label.replace(':', " -")));
+    }
     s
 }
 
@@ -1196,4 +1471,25 @@ pub fn for_graph(g: &Graph, saved: Option<Atlas>) -> (Atlas, Option<String>) {
         }
         None => (engine_atlas(g), None),
     }
+}
+
+/// Put a journey into the atlas (replacing one with the same id) and check it.
+/// This is how a person's edits land: the check re-sources every message.
+pub fn upsert_journey(g: &Graph, a: &Atlas, mut j: Journey) -> Atlas {
+    if j.id.is_empty() {
+        j.id = journey_id(&j.entry, &j.name);
+    }
+    let mut a = a.clone();
+    match a.journeys.iter().position(|x| x.id == j.id) {
+        Some(i) => a.journeys[i] = j,
+        None => a.journeys.push(j),
+    }
+    verify(g, &a, None)
+}
+
+/// Remove a journey by id; the engine's journeys come back when none are left.
+pub fn remove_journey(g: &Graph, a: &Atlas, id: &str) -> Atlas {
+    let mut a = a.clone();
+    a.journeys.retain(|j| j.id != id);
+    verify(g, &a, None)
 }

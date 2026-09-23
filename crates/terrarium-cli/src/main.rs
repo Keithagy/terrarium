@@ -141,6 +141,24 @@ enum Cmd {
         /// Print the whole atlas as Structurizr DSL instead.
         #[arg(long)]
         dsl: bool,
+        /// One journey (id or name) as a sequence: its participants and messages at `--level`.
+        #[arg(long)]
+        journey: Option<String>,
+        /// With `--journey`: print a Mermaid sequence diagram instead.
+        #[arg(long)]
+        mermaid: bool,
+    },
+    /// Have Claude narrate one journey again, with a note, and save it. One agent; nothing
+    /// else in the atlas moves. The journey is an id, a name, or an entry (`web/src/app.ts#main`);
+    /// a name nobody has heard of is followed from the code alone. Spends money.
+    /// Examples: `terrarium narrate "Sign up" --note "show the welcome email"`.
+    Narrate {
+        journey: String,
+        /// What to pay attention to, in your words.
+        #[arg(long, default_value = "")]
+        note: String,
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Have Claude discover the atlas: a surveyor reads the manifests and entry points,
     /// one agent per container groups its code into components, one agent per journey
@@ -157,9 +175,14 @@ enum Cmd {
         /// Spending cap per agent, in US dollars.
         #[arg(long, default_value_t = 2.0)]
         budget: f64,
-        /// Journeys to narrate.
+        /// Journeys to narrate (when the survey picks them).
         #[arg(long, default_value_t = 4)]
         journeys: usize,
+        /// A flow to narrate, instead of letting the survey pick: an entry (`web/src/app.ts#main`)
+        /// or a name (`Sign up`), with an optional note after ` :: `. Repeat for more.
+        /// Example: `--flow "web/src/app.ts#main :: watch the users list" --flow "Nightly cleanup"`.
+        #[arg(long)]
+        flow: Vec<String>,
         /// Forget the saved atlas and use the engine's.
         #[arg(long)]
         reset: bool,
@@ -217,8 +240,29 @@ enum AppCmd {
         journey: Option<String>,
         #[arg(long)]
         step: Option<usize>,
+        /// Show it as a sequence diagram (`--map` goes back to the C4 map).
+        #[arg(long)]
+        sequence: bool,
+        #[arg(long)]
+        map: bool,
         #[arg(long)]
         stop: bool,
+    },
+    /// Put a journey into the app's atlas from a JSON file (the shape `terrarium app atlas` prints
+    /// under `journeys`), replacing one with the same id; the engine checks it and saves it.
+    JourneySave {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Remove a journey (id or name) from the app's atlas.
+    JourneyDelete { journey: String },
+    /// Have Claude narrate one journey again in the app, with a note (blocks; spends money).
+    Narrate {
+        journey: String,
+        #[arg(long, default_value = "")]
+        note: String,
+        #[arg(long)]
+        model: Option<String>,
     },
     /// The atlas the app is showing (or `--dsl` for Structurizr DSL).
     Atlas {
@@ -229,6 +273,9 @@ enum AppCmd {
     Discover {
         #[arg(long)]
         model: Option<String>,
+        /// A flow to narrate (entry or name, ` :: note` optional); repeat for more. See `terrarium discover --help`.
+        #[arg(long)]
+        flow: Vec<String>,
         /// Forget the saved atlas and use the engine's.
         #[arg(long)]
         reset: bool,
@@ -699,15 +746,23 @@ fn run(cli: Cli) -> Result<Value> {
                 ),
             }
         }
-        Some(Cmd::Atlas { level, container, dsl }) => {
+        Some(Cmd::Atlas { level, container, dsl, journey, mermaid }) => {
             let g = load_graph(&root)?;
             let (a, stale) = atlas::for_graph(&g, cache::load_atlas(Path::new(&g.root)));
             if dsl {
                 return Ok(json!({ "dsl": atlas::to_dsl(&a) }));
             }
+            if let Some(q) = journey {
+                let j = find_journey(&a, &q)?;
+                let (lvl, focus) = level_focus(&a, level, container.as_deref())?;
+                if mermaid {
+                    return Ok(json!({ "mermaid": atlas::to_mermaid(&a, j, lvl, focus.as_deref()) }));
+                }
+                return journey_value(&a, j, lvl, focus.as_deref());
+            }
             atlas_value(&a, stale.as_deref(), level, container.as_deref(), true)
         }
-        Some(Cmd::Discover { model, parallel, budget, journeys, reset }) => {
+        Some(Cmd::Discover { model, parallel, budget, journeys, flow, reset }) => {
             let g = load_graph(&root)?;
             let groot = Path::new(&g.root).to_path_buf();
             if reset {
@@ -717,7 +772,9 @@ fn run(cli: Cli) -> Result<Value> {
                 v["discover"] = json!(if had { "reset to the engine's atlas" } else { "already the engine's atlas (no-op)" });
                 return Ok(v);
             }
-            let mut opts = discovery::Options { parallel, budget_usd: budget, max_journeys: journeys, ..discovery::Options::default() };
+            let saved = cache::load_atlas(&groot);
+            let keep: Vec<atlas::Journey> = saved.as_ref().map(|a| a.journeys.iter().filter(|j| j.source == "user").cloned().collect()).unwrap_or_default();
+            let mut opts = discovery::Options { parallel, budget_usd: budget, max_journeys: journeys, flows: flow.iter().map(|f| parse_flow(f)).collect(), keep, ..discovery::Options::default() };
             if let Some(m) = model {
                 opts.model = m;
             }
@@ -730,18 +787,33 @@ fn run(cli: Cli) -> Result<Value> {
             };
             let (a, run) = discovery::discover(&g, &opts, &runner, &progress)?;
             cache::store_atlas(&groot, &a)?;
-            let mut v = json!({
-                "run": {
-                    "model": run.model,
-                    "cost_usd": (run.cost_usd * 100.0).round() / 100.0,
-                    "secs": run.secs.round(),
-                    "agents": run.agents.iter().map(|r| json!({ "role": r.role, "target": r.target.clone().unwrap_or_default(), "ok": r.ok, "reads": r.reads, "cost_usd": (r.cost_usd * 100.0).round() / 100.0, "secs": r.secs.round(), "error": r.error.clone().unwrap_or_default() })).collect::<Vec<_>>(),
-                },
-            });
+            let mut v = json!({ "run": run_value(&run) });
             let summary = atlas_value(&a, None, LevelArg::Containers, None, false)?;
             for (k, val) in summary.as_object().unwrap() {
                 v[k] = val.clone();
             }
+            Ok(v)
+        }
+        Some(Cmd::Narrate { journey, note, model }) => {
+            let g = load_graph(&root)?;
+            let groot = Path::new(&g.root).to_path_buf();
+            let (a, _) = atlas::for_graph(&g, cache::load_atlas(&groot));
+            let mut opts = discovery::Options::default();
+            if let Some(m) = model {
+                opts.model = m;
+            }
+            let runner = discovery::claude_runner(&groot, &opts);
+            let progress = |p: discovery::Progress| {
+                if !matches!(p, discovery::Progress::JourneyDone { .. }) {
+                    eprintln!("{}", serde_json::to_string(&p).unwrap_or_default());
+                }
+            };
+            let (b, run) = discovery::narrate_one(&g, &a, &journey, &note, &opts, &runner, &progress)?;
+            cache::store_atlas(&groot, &b)?;
+            let id = b.journeys.iter().find(|j| j.id == journey || j.name.eq_ignore_ascii_case(&journey) || j.entry == journey).map(|j| j.id.clone()).unwrap_or_else(|| atlas::journey_id(if journey.contains('#') { &journey } else { "" }, &journey));
+            let j = find_journey(&b, &id)?;
+            let mut v = journey_value(&b, j, "containers", None)?;
+            v["run"] = run_value(&run);
             Ok(v)
         }
         Some(Cmd::Doctor) => doctor(&root),
@@ -784,6 +856,66 @@ fn rel_row(a: &Atlas, r: &atlas::Relationship) -> Value {
     })
 }
 
+fn run_value(run: &discovery::Run) -> Value {
+    json!({
+        "model": run.model,
+        "cost_usd": (run.cost_usd * 100.0).round() / 100.0,
+        "secs": run.secs.round(),
+        "agents": run.agents.iter().map(|r| json!({ "role": r.role, "target": r.target.clone().unwrap_or_default(), "ok": r.ok, "reads": r.reads, "cost_usd": (r.cost_usd * 100.0).round() / 100.0, "secs": r.secs.round(), "error": r.error.clone().unwrap_or_default() })).collect::<Vec<_>>(),
+    })
+}
+
+/// `entry-or-name [:: note]` as a flow request.
+fn parse_flow(s: &str) -> discovery::FlowRequest {
+    let (head, note) = s.split_once(" :: ").map(|(h, n)| (h.trim(), n.trim())).unwrap_or((s.trim(), ""));
+    if head.contains('#') {
+        discovery::FlowRequest { entry: head.into(), name: String::new(), note: note.into() }
+    } else {
+        discovery::FlowRequest { entry: String::new(), name: head.into(), note: note.into() }
+    }
+}
+
+fn find_journey<'a>(a: &'a Atlas, q: &str) -> Result<&'a atlas::Journey> {
+    let ql = q.to_lowercase();
+    a.journeys
+        .iter()
+        .find(|j| j.id == q || j.name.to_lowercase() == ql || j.entry == q || j.id == format!("j:{}", atlas::slug(q)))
+        .ok_or_else(|| anyhow!("no journey `{q}`; run `terrarium atlas` to list them"))
+}
+
+/// The level name and focus container for a journey projection.
+fn level_focus(a: &Atlas, level: LevelArg, container: Option<&str>) -> Result<(&'static str, Option<String>)> {
+    Ok(match level {
+        LevelArg::Context => ("context", None),
+        LevelArg::Containers => ("containers", None),
+        LevelArg::Components | LevelArg::Code => {
+            let shown: Vec<&atlas::Container> = a.containers.iter().filter(|c| !c.hidden).collect();
+            let c = match container {
+                Some(q) => shown.iter().find(|c| c.id == q || c.package == q || c.name.eq_ignore_ascii_case(q) || c.id == format!("c:{}", atlas::slug(q))).copied().ok_or_else(|| anyhow!("no container `{q}`; run `terrarium atlas` to list them"))?,
+                None => *shown.first().ok_or_else(|| anyhow!("the atlas has no containers"))?,
+            };
+            ("components", Some(c.id.clone()))
+        }
+    })
+}
+
+/// One journey as a sequence at one level: participants, then messages in order.
+fn journey_value(a: &Atlas, j: &atlas::Journey, level: &str, focus: Option<&str>) -> Result<Value> {
+    let p = atlas::project(a, j, level, focus);
+    Ok(json!({
+        "journey": { "id": j.id, "name": j.name, "summary": j.summary, "entry": j.entry, "source": j.source, "note": j.note, "messages": j.messages.len(), "claimed": j.messages.iter().filter(|m| m.source == "claimed").count() },
+        "level": p.level,
+        "focus": focus.map(|f| element_name(a, f)),
+        "participants": p.participants.iter().map(|id| json!({ "id": id, "name": element_name(a, id) })).collect::<Vec<_>>(),
+        "messages": p.messages.iter().map(|m| json!({ "n": m.n, "from": element_name(a, &m.from), "to": element_name(a, &m.to), "kind": m.kind, "label": m.label, "source": m.source, "by": m.by, "caption": m.caption })).collect::<Vec<_>>(),
+        "help": [
+            "Run `terrarium atlas --journey <id> --level components --container <name>` to open one container's components",
+            "Run `terrarium atlas --journey <id> --mermaid` for a Mermaid sequence diagram",
+            "Run `terrarium narrate <id> --note \"...\"` to have Claude narrate it again (spends money)"
+        ],
+    }))
+}
+
 /// One diagram of the atlas, as the CLI prints it.
 fn atlas_value(a: &Atlas, stale: Option<&str>, level: LevelArg, container: Option<&str>, with_help: bool) -> Result<Value> {
     let shown: Vec<&atlas::Container> = a.containers.iter().filter(|c| !c.hidden).collect();
@@ -822,7 +954,7 @@ fn atlas_value(a: &Atlas, stale: Option<&str>, level: LevelArg, container: Optio
         }
     }
     if !a.journeys.is_empty() {
-        v["journeys"] = json!(a.journeys.iter().map(|j| json!({ "id": j.id, "name": j.name, "steps": j.steps.len(), "entry": j.entry })).collect::<Vec<_>>());
+        v["journeys"] = json!(a.journeys.iter().map(|j| json!({ "id": j.id, "name": j.name, "messages": j.messages.len(), "steps": j.steps.len(), "source": j.source, "entry": j.entry })).collect::<Vec<_>>());
     }
     if !a.guide.callouts.is_empty() {
         v["callouts"] = json!(a.guide.callouts.iter().map(|c| json!({ "title": c.title, "detail": c.detail })).collect::<Vec<_>>());
@@ -1006,7 +1138,14 @@ fn app(cmd: AppCmd) -> Result<Value> {
         AppCmd::Select { element } => b.post("/select", json!({ "element": element })),
         AppCmd::Search { query } => b.post("/search", json!({ "q": query })),
         AppCmd::Level { level, focus } => b.post("/level", json!({ "level": format!("{level:?}").to_lowercase(), "focus": focus })),
-        AppCmd::Journey { journey, step, stop } => b.post("/journey", if stop { json!({}) } else { json!({ "journey": journey, "step": step }) }),
+        AppCmd::Journey { journey, step, sequence, map, stop } => b.post("/journey", if stop { json!({}) } else { json!({ "journey": journey, "step": step, "view": if sequence { Some("sequence") } else if map { Some("map") } else { None } }) }),
+        AppCmd::JourneySave { file } => {
+            let text = std::fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
+            let j: Value = serde_json::from_str(&text).with_context(|| format!("{} is not JSON", file.display()))?;
+            b.post("/journey/save", json!({ "journey": j }))
+        }
+        AppCmd::JourneyDelete { journey } => b.post("/journey/delete", json!({ "journey": journey })),
+        AppCmd::Narrate { journey, note, model } => b.post_long("/journey/narrate", json!({ "journey": journey, "note": note, "model": model })),
         AppCmd::Atlas { dsl } => {
             if dsl {
                 Ok(json!({ "dsl": String::from_utf8_lossy(&b.get_bytes("/atlas/dsl")?).to_string() }))
@@ -1016,11 +1155,11 @@ fn app(cmd: AppCmd) -> Result<Value> {
                 atlas_value(&a, v["stale"].as_str(), LevelArg::Containers, None, false)
             }
         }
-        AppCmd::Discover { model, reset } => {
+        AppCmd::Discover { model, flow, reset } => {
             if reset {
                 b.post("/discover/reset", json!({}))
             } else {
-                b.post_long("/discover", json!({ "model": model }))
+                b.post_long("/discover", json!({ "model": model, "flows": flow.iter().map(|f| parse_flow(f)).collect::<Vec<_>>() }))
             }
         }
         AppCmd::Screenshot { out } => {

@@ -51,12 +51,23 @@
             <button data-level="components" data-testid="level-components" title="Inside one container (3)">Components</button>
             <button data-level="code" data-testid="level-code" title="One component's files (4)">Code</button>
           </div>
+          <div id="view-toggle" class="segmented views" role="group" aria-label="Journey view" hidden>
+            <button data-view="map" data-testid="view-map" class="is-active" title="The journey numbered on the C4 map (S)">Map</button>
+            <button data-view="sequence" data-testid="view-sequence" title="The journey as a sequence diagram at this level (S)">Sequence</button>
+          </div>
           <button id="fit-btn" class="ghost" data-testid="fit" title="Fit the diagram (F)">Fit</button>
         </div>
       </div>
       <span id="bridge" class="bench-pill is-quiet" data-testid="bridge" title="Local agent bridge">bridge starting</span>
       <svg id="diagram" data-testid="diagram" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" preserveAspectRatio="xMidYMid meet"></svg>
       <section id="code-view" data-testid="code-view" hidden></section>
+      <section id="sequence" data-testid="sequence" data-panel="sequence" hidden>
+        <div class="seq-head"></div>
+        <div class="seq-body">
+          <div class="seq-scroll"><svg class="seq-svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+          <aside class="seq-editor" data-testid="editor" hidden></aside>
+        </div>
+      </section>
     </main>
 
     <aside id="card" data-testid="card" data-panel="card" hidden></aside>
@@ -76,7 +87,7 @@
         <button id="jb-next" class="play" data-testid="journey-next" title="Next step (→)">›</button>
       </div>
       <div class="jb-body">
-        <div class="jb-top"><b id="jb-title" data-testid="journey-title"></b><span id="jb-count" class="meta" data-testid="journey-count"></span><button id="jb-all" class="link-quiet" data-testid="journey-all">Show the whole path</button></div>
+        <div class="jb-top"><b id="jb-title" data-testid="journey-title"></b><span id="jb-count" class="meta" data-testid="journey-count"></span><button id="jb-edit" class="link-quiet" data-testid="journey-edit" title="Edit the sequence (E)">Edit</button><button id="jb-all" class="link-quiet" data-testid="journey-all">Show the whole path</button></div>
         <div id="jb-caption" class="jb-caption" data-testid="journey-caption"></div>
         <input id="jb-range" data-testid="journey-range" type="range" min="0" max="0" step="1" value="0" aria-label="Journey step" />
       </div>
@@ -113,6 +124,28 @@
       <ul id="recent" class="recent" data-testid="recent"></ul>
     </div>
 
+    <div id="plan" class="overlay is-sheet" data-testid="plan-overlay" hidden>
+      <div class="sheet is-wide" data-testid="plan">
+        <h2>Discover with Claude</h2>
+        <p class="hint">A surveyor reads the manifests and entry points, one agent per container groups its code into components, one narrator per journey writes its sequence diagram, and an editor writes the guide. The engine checks every arrow. This spends money.</p>
+        <div class="plan-section">
+          <div class="group-title">Journeys to narrate</div>
+          <p class="meta plan-hint">Tick the flows you care about, name them by what the user is doing, and leave a note for the narrator. Leave everything unticked to let the surveyor choose.</p>
+          <ul id="plan-flows" class="plan-flows" data-testid="plan-flows"></ul>
+          <div class="plan-new">
+            <input id="plan-new-name" data-testid="plan-new-name" type="text" placeholder="Another flow, by name: “Sign up and get a welcome email”" />
+            <input id="plan-new-note" data-testid="plan-new-note" type="text" placeholder="Note for the narrator (optional)" />
+            <button class="ghost" id="plan-add" data-testid="plan-add">Add</button>
+          </div>
+        </div>
+        <div class="plan-foot">
+          <button class="primary" id="plan-run" data-testid="plan-run">Run discovery</button>
+          <button class="ghost" id="plan-cancel" data-testid="plan-cancel">Cancel</button>
+          <span id="plan-summary" class="meta" data-testid="plan-summary"></span>
+        </div>
+      </div>
+    </div>
+
     <div id="scanning" class="overlay" data-testid="scanning" hidden>
       <div class="spinner"></div>
       <h2>Surveying the repository</h2>
@@ -129,6 +162,8 @@
           <dt>Enter</dt><dd>Open the selected element</dd>
           <dt>Backspace</dt><dd>Up one level</dd>
           <dt>J</dt><dd>Next journey</dd>
+          <dt>S</dt><dd>Journey on the map, or as a sequence</dd>
+          <dt>E</dt><dd>Edit the journey's sequence</dd>
           <dt>← →</dt><dd>Previous, next journey step</dd>
           <dt>F</dt><dd>Fit the diagram</dd>
           <dt>R</dt><dd>Rescan</dd>
