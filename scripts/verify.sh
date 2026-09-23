@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end verification an agent can run unattended:
 # build → unit tests → CLI on the fixture → launch the app → exercise the bridge →
-# a discovery with the stand-in claude (nothing spent) → screenshot → quit.
+# the scout's proposals and a discovery with the stand-in claude (nothing spent) →
+# screenshot → quit.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,6 +25,18 @@ expect() {
     cat "$file"
     fail "$label (expected /$pattern/)"
   fi
+}
+# expect_soon <label> <pattern> <command...>: like expect, retried for up to 10s.
+expect_soon() {
+  local label=$1 pattern=$2; shift 2
+  local file="$OUT/${label// /_}.toon"
+  for _ in $(seq 1 20); do
+    "$@" > "$file" 2>&1
+    if grep -qE "$pattern" "$file"; then return 0; fi
+    sleep 0.5
+  done
+  cat "$file"
+  fail "$label (expected /$pattern/)"
 }
 
 step "build ui"
@@ -59,9 +72,18 @@ expect "journey components" "Polyglot Web / Api,Polyglot Api" "$T" --repo fixtur
 expect "journey mermaid" "sequenceDiagram" "$T" --repo fixtures/polyglot atlas --journey j:web-src-app-ts-main --mermaid
 
 step "cli discover (stand-in claude, nothing spent)"
+expect "propose" "^proposed: 4 flows" "$T" --repo fixtures/polyglot propose
+expect "propose traced" "Follow main to the end,web/src/app.ts#main,trace,4" "$T" --repo fixtures/polyglot propose
+expect "propose endpoint" "Serve http /api/health,api/main.py#health,endpoint,0,Polyglot Api" "$T" --repo fixtures/polyglot propose
+expect "propose untraced" "Nightly cleanup,\(the narrator finds it\),none" "$T" --repo fixtures/polyglot propose
+expect "propose help" "terrarium discover --flow" "$T" --repo fixtures/polyglot propose
 expect "discover" "system: Polyglot Town" "$T" --repo fixtures/polyglot discover
+expect "discover scouted" "\"j:api-main-py-health\",.*api/main.py#health" "$T" --repo fixtures/polyglot atlas
+expect "discover scouted untraced" "\"j:nightly-cleanup\"" "$T" --repo fixtures/polyglot atlas
+expect "discover scouted why" "why: Something outside this repository calls it." "$T" --repo fixtures/polyglot atlas --journey j:api-main-py-health
 expect "discover check" "claimed" "$T" --repo fixtures/polyglot atlas
 expect "discover steered" "\"j:nightly-cleanup\",Follow one request \(there is no trace\)" "$T" --repo fixtures/polyglot discover --flow "web/src/app.ts#main :: watch the users list" --flow "Nightly cleanup :: there is no trace"
+expect "discover kept proposal" "\"j:api-main-py-health\",Follow one request \(say who polls it\)" "$T" --repo fixtures/polyglot discover --flow "Serve the health check @ api/main.py#health :: say who polls it"
 expect "narrate" "source: claude" "$T" --repo fixtures/polyglot narrate j:web-src-app-ts-main --note "say more"
 expect "discover reset" "reset to the engine's atlas" "$T" --repo fixtures/polyglot discover --reset
 
@@ -104,10 +126,26 @@ expect "journey claimed" "pings,claimed" "$T" app journey "j:mine" --sequence
 expect "journey delete" "deleted: \"?j:mine" "$T" app journey-delete j:mine
 "$T" app reset > /dev/null
 
+step "plan sheet: the scout proposes, the person steers (stand-in claude)"
+expect "plan open" "clicked: discover-claude" "$T" app click discover-claude
+expect "plan ui" "plan-propose" "$T" app ui
+expect "plan propose" "clicked: plan-propose" "$T" app click plan-propose
+expect_soon "plan proposed" "Nightly cleanup,\"\",A stand-in guesses .*,true" "$T" app ui
+expect "plan why" "plan-flow-3-why" "$T" app ui
+expect "plan rows" "Follow main to the end,web/src/app.ts#main,.*,true" "$T" app ui
+expect "plan leftover" "\"\",web/src/api.ts#fetchUser,\"\",false" "$T" app ui
+expect "app propose" "^proposed: 4 flows" "$T" app propose
+expect "app propose plan" "open: true" "$T" app propose
+expect "plan cancel" "clicked: plan-cancel" "$T" app click plan-cancel
+
 step "discover in the app (stand-in claude)"
-expect "app discover" "backed: 2[0-9]" "$T" app discover --flow "web/src/app.ts#main :: watch the users list"
+expect "app discover" "backed: 2[0-9]" "$T" app discover
 expect "discovered" "discovered by" "$T" app ui
 expect "notes" "Field notes" "$T" app ui
+expect "notes scout" "stage-scout" "$T" app ui
+expect "notes scout agent" "agent-scout" "$T" app ui
+expect "app scouted" "\"j:nightly-cleanup\"" "$T" app atlas
+expect "app discover steered" "backed: 2[0-9]" "$T" app discover --flow "web/src/app.ts#main :: watch the users list"
 expect "app narrate" "source: claude" "$T" app narrate j:web-src-app-ts-main --note "say more"
 expect "app reset atlas" "source: engine" "$T" app discover --reset
 

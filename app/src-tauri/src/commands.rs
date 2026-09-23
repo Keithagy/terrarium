@@ -170,6 +170,52 @@ pub async fn discover_with_claude(app: AppHandle, state: State<'_, Arc<AppState>
     tauri::async_runtime::spawn_blocking(move || do_discover(&app2, model, flows.unwrap_or_default())).await.map_err(err)?.map_err(err)
 }
 
+/// Have the scout propose the key flows, for the plan sheet: one agent, nothing
+/// saved. Progress arrives as `propose:started`, `propose:progress` (the agent's
+/// events), then `propose:done` (`{proposals, run}`) or `propose:error`.
+pub fn do_propose(app: &AppHandle, model: Option<String>) -> anyhow::Result<Value> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let graph = state.graph().ok_or_else(|| anyhow::anyhow!("no repository loaded"))?;
+    let l = state.atlas().ok_or_else(|| anyhow::anyhow!("no atlas loaded"))?;
+    if state.discovering.swap(true, Ordering::SeqCst) {
+        anyhow::bail!("a discovery is already running");
+    }
+    let _ = app.emit("propose:started", json!({}));
+    let result = (|| {
+        let _span = tracing::info_span!("propose_flows").entered();
+        let mut opts = discovery::Options::default();
+        if let Some(m) = model {
+            opts.model = m;
+        }
+        let root = Path::new(&graph.root);
+        let runner = discovery::claude_runner(root, &opts);
+        let progress = |p: discovery::Progress| {
+            let _ = app.emit("propose:progress", &p);
+        };
+        let (proposals, run) = discovery::propose_flows(&graph, &l.atlas, &opts, &runner, &progress)?;
+        tracing::info!(flows = proposals.len(), cost_usd = run.cost_usd, secs = run.secs, "flows proposed");
+        Ok::<_, anyhow::Error>(json!({ "proposals": proposals, "run": run }))
+    })();
+    state.discovering.store(false, Ordering::SeqCst);
+    match &result {
+        Ok(v) => {
+            let _ = app.emit("propose:done", v);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "proposing flows failed");
+            let _ = app.emit("propose:error", json!({ "error": e.to_string() }));
+        }
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn propose_flows(app: AppHandle, state: State<'_, Arc<AppState>>, model: Option<String>) -> Res<Value> {
+    state.count(&state.counters.ipc_calls);
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || do_propose(&app2, model)).await.map_err(err)?.map_err(err)
+}
+
 /// Install a checked atlas as the current one and save it next to the graph.
 fn install_atlas(state: &AppState, root: &Path, a: Atlas) -> anyhow::Result<()> {
     cache::store_atlas(root, &a)?;

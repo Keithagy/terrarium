@@ -24,6 +24,7 @@ pub fn run() {
             commands::get_atlas,
             commands::atlas_dsl,
             commands::discover_with_claude,
+            commands::propose_flows,
             commands::reset_atlas,
             commands::save_journey,
             commands::delete_journey,

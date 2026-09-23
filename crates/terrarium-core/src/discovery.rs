@@ -1,18 +1,24 @@
 //! Discovery: agents read the codebase and write the atlas, and the engine
 //! checks every word against the graph.
 //!
-//! Four kinds of agent run in three stages:
+//! Five kinds of agent run in four stages:
 //!
 //! 1. The surveyor (one agent) reads the manifests, README and entry points and
 //!    decides what the system is, who uses it, what it talks to, and what each
 //!    package runs as.
-//! 2. The field: one agent per container reads that container's code and
+//! 2. The scout (one agent) reads where flows begin (routes, commands, jobs,
+//!    handlers, UI actions) and proposes the key flows, including the ones the
+//!    scanner cannot trace; the engine matches each to a trace, an endpoint or a
+//!    file, and keeps a spread across containers. It runs only when the person did
+//!    not choose the flows, and can run alone ([`propose_flows`]) so a person steers
+//!    from its proposals. When it fails, the survey's picks stand.
+//! 3. The field: one agent per container reads that container's code and
 //!    groups it into components, and one agent per journey follows a flow and
 //!    writes its messages, over the atlas's own elements, as a sequence diagram.
 //!    They run in parallel. The person steering the atlas may choose the flows
 //!    and leave a note for each ([`Options::flows`]); one flow can be narrated
 //!    again on its own ([`narrate_one`]).
-//! 3. The editor (one agent, no tools) writes the summary, the reading guide and
+//! 4. The editor (one agent, no tools) writes the summary, the reading guide and
 //!    the callouts from what the others found.
 //!
 //! Then the engine verifies: components only hold files that exist, every
@@ -29,7 +35,7 @@ use crate::query;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -72,6 +78,37 @@ pub struct FlowRequest {
     /// What to pay attention to, in the person's words.
     #[serde(default)]
     pub note: String,
+    /// Why the flow matters, when the scout proposed it; the journey keeps it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
+}
+
+/// A flow the scout proposes, matched to the code: what the user is doing, why a
+/// newcomer should see it, and where the narrator starts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Proposal {
+    /// What the user is doing, as a verb phrase.
+    pub name: String,
+    /// One sentence: why the flow matters.
+    pub why: String,
+    /// Where the scout said it starts: a symbol path, a file, a route or a command.
+    pub start: String,
+    /// The entry the narrator starts from: a trace's entry, or a symbol or file in the
+    /// graph; empty when the narrator must find the start in the code.
+    pub entry: String,
+    /// How `start` matched the code: `trace`, `symbol`, `endpoint`, `file`, or `none`.
+    pub matched: String,
+    /// Boundaries the matched trace crosses; 0 without a trace.
+    pub hops: u32,
+    /// Container ids it passes through, the one it starts in first.
+    pub containers: Vec<String>,
+}
+
+impl Proposal {
+    /// The proposal as a flow the person asks for.
+    pub fn flow(&self) -> FlowRequest {
+        FlowRequest { entry: self.entry.clone(), name: self.name.clone(), note: String::new(), why: self.why.clone() }
+    }
 }
 
 impl Default for Options {
@@ -107,7 +144,7 @@ pub fn find_claude() -> PathBuf {
 /// One agent's job, as handed to a [`Runner`].
 #[derive(Debug, Clone)]
 pub struct AgentCall {
-    /// `survey`, `container`, `journey` or `editor`.
+    /// `survey`, `scout`, `container`, `journey` or `editor`.
     pub role: String,
     /// The container or journey id this agent works on.
     pub target: Option<String>,
@@ -152,13 +189,16 @@ pub struct Run {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Progress {
-    Started { model: String, containers: usize, journeys: usize },
-    /// `survey`, `field`, `editor`, `verify`.
+    /// `journeys` is an upper bound when the scout runs: it may propose fewer.
+    Started { model: String, containers: usize, journeys: usize, scout: bool },
+    /// `survey`, `scout`, `field`, `editor`, `verify`.
     Stage { stage: String },
     AgentStarted { role: String, target: Option<String>, name: String },
     AgentActivity { role: String, target: Option<String>, #[serde(flatten)] activity: AgentEvent },
     AgentDone { role: String, target: Option<String>, ok: bool, cost_usd: f64, secs: f64, error: Option<String> },
     SurveyDone { system: atlas::System, people: Vec<Person>, externals: Vec<External>, containers: Vec<Container> },
+    /// The key flows the scout proposed, matched to the code; these are the journeys to narrate.
+    Proposed { flows: Vec<Proposal> },
     ContainerDone { container: Container },
     JourneyDone { journey: Journey },
     Verified { atlas: Atlas },
@@ -235,6 +275,25 @@ struct ContainerSurvey {
 struct JourneyPick {
     entry: String,
     name: String,
+}
+
+#[derive(Deserialize)]
+struct ScoutAnswer {
+    #[serde(default)]
+    flows: Vec<ProposalAnswer>,
+}
+
+#[derive(Deserialize)]
+struct ProposalAnswer {
+    name: String,
+    #[serde(default)]
+    why: String,
+    #[serde(default)]
+    start: String,
+    #[serde(default)]
+    containers: Vec<String>,
+    #[serde(default)]
+    trace: String,
 }
 
 #[derive(Deserialize)]
@@ -368,6 +427,21 @@ fn survey_schema() -> Value {
     )
 }
 
+fn scout_schema() -> Value {
+    obj(
+        &["flows"],
+        json!({
+            "flows": arr(obj(&["name", "why", "start", "containers", "trace"], json!({
+                "name": s("what the user or the system is doing, as a verb phrase of 3 to 8 words: 'Sign up and get a welcome email'"),
+                "why": s("one sentence: what a newcomer learns about the system from this flow"),
+                "start": s("where it starts: a symbol path `file#symbol` or a file path as the repository spells it, or a route or command as listed under endpoints (`http /api/users`, `ipc scan_repo`); empty if you cannot tell"),
+                "containers": arr(s("package name of a container it passes through, the one it starts in first")),
+                "trace": s("the entry of the scanner's journey it follows, exactly as listed; empty if none does")
+            })))
+        }),
+    )
+}
+
 fn container_schema() -> Value {
     obj(
         &["description", "technology", "responsibilities", "components", "relationships"],
@@ -451,9 +525,9 @@ fn survey_prompt(g: &Graph, f: &atlas::Facts, base: &Atlas, traces: &[query::Tra
             }
         ));
     }
-    let eps: String = query::endpoints(g).iter().take(40).map(|e| format!("- {} ({})\n", e.key, e.status)).collect();
-    let flows: String = query::flows(g).iter().take(40).map(|fl| format!("- {} -> {} via {}\n", fl.from_path, fl.to_path, fl.label)).collect();
-    let tr: String = traces.iter().map(|t| format!("- {} ({} boundaries: {})\n", t.entry_path, t.hops, t.via.join(", "))).collect();
+    let eps = endpoints_block(g);
+    let flows = flows_block(g);
+    let tr = traces_block(traces);
     format!(
         "You are surveying a codebase to draw its C4 diagrams: the system in context (people and outside systems), its containers (the things that run: web apps, services, workers, command lines, libraries) and later their components. Read the README, the manifests and the entry points; skim more if the purpose is unclear. {VOICE}\n\
 \n\
@@ -469,6 +543,48 @@ Answer with: the system's name, purpose and summary; the people (roles) who use 
         loc = g.stats.loc,
         pick = if asked.is_empty() { format!("pick up to {} that best show what the system does, and name each by what the user is doing", traces.len().min(8)) } else { "for reference; the journeys are already chosen below, so answer with an empty list".to_string() },
         chosen = if asked.is_empty() { String::new() } else { format!("\nThe person steering this atlas has chosen the journeys to narrate:\n{}", asked.iter().map(|f| format!("- {}{}{}\n", if f.name.is_empty() { f.entry.clone() } else { f.name.clone() }, if f.entry.is_empty() || f.name.is_empty() { String::new() } else { format!(" (from {})", f.entry) }, if f.note.is_empty() { String::new() } else { format!(": {}", f.note) })).collect::<String>()) },
+    )
+}
+
+/// Endpoints, cross-language flows and traces, as the survey and the scout read them.
+fn endpoints_block(g: &Graph) -> String {
+    query::endpoints(g).iter().take(40).map(|e| format!("- {} ({})\n", e.key, e.status)).collect()
+}
+
+fn flows_block(g: &Graph) -> String {
+    query::flows(g).iter().take(40).map(|fl| format!("- {} -> {} via {}\n", fl.from_path, fl.to_path, fl.label)).collect()
+}
+
+fn traces_block(traces: &[query::Trace]) -> String {
+    traces.iter().map(|t| format!("- {} ({} boundaries: {})\n", t.entry_path, t.hops, t.via.join(", "))).collect()
+}
+
+/// The scout: what the system does end to end that a newcomer must see. It reads
+/// where flows begin, including the ones the static tracer cannot follow.
+fn scout_prompt(g: &Graph, a: &Atlas, traces: &[query::Trace], max: usize) -> String {
+    let containers: String = a.containers.iter().filter(|c| !c.hidden).map(|c| format!("- {} (package `{}`, {}): {}\n", c.name, c.package, atlas::kind_label(&c.kind).to_lowercase(), c.description)).collect();
+    let people: Vec<String> = a.people.iter().map(|p| format!("{} ({})", p.name, p.description)).collect();
+    let externals: Vec<String> = a.externals.iter().map(|x| format!("{} ({})", x.name, x.kind)).collect();
+    let tr = traces_block(traces);
+    format!(
+        "You are scouting {sys} for its key flows: the few things it does end to end that a newcomer must see to understand it. {purpose} Read the code where flows begin: routes and their handlers, command-line subcommands, scheduled jobs, queue consumers, event handlers, UI actions, and the README (the repository is the current directory). The scanner follows calls from one place to the next, so it misses flows it cannot see: a client and a server that meet through a URL built at run time, a producer and a consumer that meet on a queue, a job a scheduler starts, a subcommand, a button. Find those too. {VOICE}\n\
+\n\
+Containers:\n{containers}People: {people}.\nOutside systems: {externals}.\n\
+\n\
+Endpoints (routes, IPC commands, queue topics) and whether both sides exist in the repository:\n{eps}\n\
+Places where data crosses between languages:\n{flows}\n\
+Journeys the scanner can follow end to end, best first:\n{tr}\n\
+Participants on the diagrams:\n{participants}\n\
+Answer with up to {max} flows, the most important first. Prefer flows that start in different containers over variations of one flow. For each: a name (what the user is doing), why it matters (one sentence), where it starts, the containers it passes through (package names), and the scanner's journey it follows, if one does.",
+        sys = a.system.name,
+        purpose = a.system.purpose,
+        containers = if containers.is_empty() { "- none\n".to_string() } else { containers },
+        people = if people.is_empty() { "none known".into() } else { people.join("; ") },
+        externals = if externals.is_empty() { "none known".into() } else { externals.join("; ") },
+        eps = endpoints_block(g),
+        flows = flows_block(g),
+        tr = if tr.is_empty() { "- none\n".to_string() } else { tr },
+        participants = participants_block(a),
     )
 }
 
@@ -519,7 +635,8 @@ fn participants_block(a: &Atlas) -> String {
 
 /// One journey: the participants, the engine's draft messages (from the trace, if
 /// there is one), the person's note, and the ask.
-fn journey_prompt(a: &Atlas, name_hint: &str, entry: &str, trace: Option<&query::Trace>, draft: &[atlas::Message], note: &str) -> String {
+fn journey_prompt(a: &Atlas, c: &Chosen, draft: &[atlas::Message]) -> String {
+    let (name_hint, entry, trace, note) = (c.name.as_str(), c.entry.as_str(), c.trace.as_ref(), c.note.as_str());
     let mut lines = String::new();
     if let Some(t) = trace {
         for (i, st) in t.steps.iter().enumerate() {
@@ -549,10 +666,11 @@ fn journey_prompt(a: &Atlas, name_hint: &str, entry: &str, trace: Option<&query:
     };
     let draft_block = if msgs.is_empty() { String::new() } else { format!("\nThe engine's draft of the messages, over the participants below (keep what is right, reword it, drop what does not belong, add what the code shows):\n{msgs}") };
     let note_block = if note.trim().is_empty() { String::new() } else { format!("\nThe person steering this atlas says: {}\n", note.trim()) };
+    let why_block = if c.why.trim().is_empty() { String::new() } else { format!("Why it matters: {}\n", c.why.trim()) };
     format!(
         "You are narrating one journey through {sys} for its sequence diagram: what happens, in order, when {hint}. Read the code at each step (the repository is the current directory). {VOICE}\n\
 \n\
-{trace_block}{draft_block}\n\
+{why_block}{trace_block}{draft_block}\n\
 Participants (every arrow joins two of these; use the ids or the names exactly as written; a component is finer than its container, so prefer it when you know which one):\n{participants}{note_block}\n\
 Answer with a name (what the user is doing), a 2-sentence summary, and the messages in order: from, to, kind (call, flow, store or return), a short label for the arrow, and a one-sentence caption. The engine will check every message against the calls, imports and flows it found; a message it cannot see is kept but marked as a claim, so only write what the code shows.",
         sys = a.system.name,
@@ -657,16 +775,18 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
     a.relationships.retain(|r| !r.to.starts_with("x:") && !r.from.starts_with("p:"));
     a.journeys.clear();
     let traces = query::traces(g);
-    let candidates: Vec<&query::Trace> = traces.iter().take(8).collect();
+    let candidates = atlas::rank_traces(g, &traces, 8);
     let mut runs: Vec<AgentRun> = Vec::new();
     let mut claims: Words = HashMap::new();
     let field_containers = a.containers.iter().filter(|c| !c.hidden && !f.packages[&c.package].1.is_empty()).count();
-    let planned = if opts.flows.is_empty() { candidates.len().min(opts.max_journeys) } else { opts.flows.len() };
-    progress(Progress::Started { model: opts.model.clone(), containers: field_containers, journeys: planned });
+    // The scout proposes the key flows unless the person chose them.
+    let scouting = opts.flows.is_empty() && opts.max_journeys > 0;
+    let planned = if scouting { opts.max_journeys } else if opts.flows.is_empty() { 0 } else { opts.flows.len() };
+    progress(Progress::Started { model: opts.model.clone(), containers: field_containers, journeys: planned, scout: scouting });
 
     // ---- 1. survey
     progress(Progress::Stage { stage: "survey".into() });
-    let call = AgentCall { role: "survey".into(), target: None, prompt: survey_prompt(g, &f, &a, &candidates.iter().map(|t| (*t).clone()).collect::<Vec<_>>(), &opts.flows), schema: survey_schema(), tools: true };
+    let call = AgentCall { role: "survey".into(), target: None, prompt: survey_prompt(g, &f, &a, &candidates, &opts.flows), schema: survey_schema(), tools: true };
     let (run, value) = run_one(&call, "Surveying the repository", runner, progress);
     runs.push(run);
     let mut picks: Vec<(String, String)> = Vec::new();
@@ -712,14 +832,33 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
         }
         None => tracing::warn!("survey failed; the engine's names stand"),
     }
-    // Journeys to narrate: the person's flows, else the survey's picks, else the longest traces.
+    progress(Progress::SurveyDone { system: a.system.clone(), people: a.people.clone(), externals: a.externals.clone(), containers: a.containers.clone() });
+    // Journeys to narrate: the person's flows; else the scout's proposals; else the
+    // survey's picks among the traces, topped up with the traces ranked best.
     let mut chosen: Vec<Chosen> = Vec::new();
-    if opts.flows.is_empty() {
+    if !opts.flows.is_empty() {
+        for fr in &opts.flows {
+            let c = choose_flow(g, &traces, fr);
+            if !chosen.iter().any(|x| x.id == c.id) {
+                chosen.push(c);
+            }
+        }
+    } else if scouting {
+        // ---- 1b. the scout
+        progress(Progress::Stage { stage: "scout".into() });
+        let (run, found) = scout(g, &a, &traces, &candidates, opts, runner, progress);
+        runs.push(run);
+        match found {
+            Some(found) if !found.is_empty() => chosen = found.into_iter().map(|(p, trace)| Chosen { id: atlas::journey_id(&p.entry, &p.name), entry: p.entry, name: p.name, note: String::new(), why: p.why, trace }).collect(),
+            _ => tracing::warn!("the scout proposed nothing; the survey's picks stand"),
+        }
+    }
+    if chosen.is_empty() && opts.flows.is_empty() {
         for (entry, name) in &picks {
             if let Some(t) = candidates.iter().find(|t| &t.entry_path == entry)
                 && !chosen.iter().any(|c| c.entry == t.entry_path)
             {
-                chosen.push(Chosen { id: atlas::journey_id(&t.entry_path, ""), entry: t.entry_path.clone(), name: name.clone(), note: String::new(), trace: Some((*t).clone()) });
+                chosen.push(Chosen { id: atlas::journey_id(&t.entry_path, ""), entry: t.entry_path.clone(), name: name.clone(), note: String::new(), why: String::new(), trace: Some(t.clone()) });
             }
         }
         for t in &candidates {
@@ -727,19 +866,11 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
                 break;
             }
             if !chosen.iter().any(|c| c.entry == t.entry_path) {
-                chosen.push(Chosen { id: atlas::journey_id(&t.entry_path, ""), entry: t.entry_path.clone(), name: String::new(), note: String::new(), trace: Some((*t).clone()) });
+                chosen.push(Chosen { id: atlas::journey_id(&t.entry_path, ""), entry: t.entry_path.clone(), name: String::new(), note: String::new(), why: String::new(), trace: Some(t.clone()) });
             }
         }
         chosen.truncate(opts.max_journeys);
-    } else {
-        for fr in &opts.flows {
-            let c = choose_flow(g, &traces, fr);
-            if !chosen.iter().any(|x| x.id == c.id) {
-                chosen.push(c);
-            }
-        }
     }
-    progress(Progress::SurveyDone { system: a.system.clone(), people: a.people.clone(), externals: a.externals.clone(), containers: a.containers.clone() });
 
     // ---- 2. the field: containers and journeys, in parallel
     progress(Progress::Stage { stage: "field".into() });
@@ -759,7 +890,7 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
     let mut drafts: Vec<Vec<atlas::Message>> = Vec::new();
     for (i, c) in chosen.iter().enumerate() {
         let draft = c.trace.as_ref().map(|t| atlas::messages_from_trace(&a, t)).unwrap_or_default();
-        jobs.push((Job::Journey(i), AgentCall { role: "journey".into(), target: Some(c.id.clone()), prompt: journey_prompt(&a, &c.name, &c.entry, c.trace.as_ref(), &draft, &c.note), schema: journey_schema(), tools: true }, format!("Following {}", c.title())));
+        jobs.push((Job::Journey(i), AgentCall { role: "journey".into(), target: Some(c.id.clone()), prompt: journey_prompt(&a, c, &draft), schema: journey_schema(), tools: true }, format!("Following {}", c.title())));
         drafts.push(draft);
     }
     let total = jobs.len();
@@ -831,8 +962,10 @@ pub fn discover(g: &Graph, opts: &Options, runner: &Runner, progress: &(dyn Fn(P
         let j = match journey_answers[i].take() {
             Some(ans) => Some(journey_from_answer(&a, c, &drafts[i], ans)),
             None => c.trace.as_ref().and_then(|t| atlas::engine_journey(&a, t)).map(|mut j| {
+                j.id = c.id.clone();
                 j.name = c.title();
                 j.note = c.note.clone();
+                j.why = c.why.clone();
                 j
             }),
         };
@@ -883,6 +1016,7 @@ struct Chosen {
     entry: String,
     name: String,
     note: String,
+    why: String,
     trace: Option<query::Trace>,
 }
 
@@ -898,18 +1032,83 @@ impl Chosen {
     }
 }
 
-/// Match a person's flow request to a trace: by entry path, or by a name that
-/// spells an entry path. A request with no trace is followed from the code alone.
+/// Match a person's flow request to the code (see [`resolve_start`]): by its entry,
+/// or by a name that spells an entry, a file, a route or a command. A request that
+/// matches nothing is followed from the code alone.
 fn choose_flow(g: &Graph, traces: &[query::Trace], fr: &FlowRequest) -> Chosen {
     let want = if fr.entry.is_empty() { fr.name.trim() } else { fr.entry.trim() };
-    let trace = traces
-        .iter()
-        .find(|t| t.entry_path == want)
-        .cloned()
-        .or_else(|| if want.contains('#') { g.find_by_path(want).and_then(|n| query::trace_from(g, n.id)) } else { None });
-    let entry = trace.as_ref().map(|t| t.entry_path.clone()).unwrap_or_else(|| fr.entry.trim().to_string());
+    let (found, trace, _) = resolve_start(g, traces, want, "");
+    let entry = if found.is_empty() { fr.entry.trim().to_string() } else { found };
     let name = if fr.name.trim() == entry { String::new() } else { fr.name.trim().to_string() };
-    Chosen { id: atlas::journey_id(&entry, &name), entry, name, note: fr.note.trim().to_string(), trace }
+    Chosen { id: atlas::journey_id(&entry, &name), entry, name, note: fr.note.trim().to_string(), why: fr.why.trim().to_string(), trace }
+}
+
+/// Where a flow starts, as a person or an agent wrote it, matched to the code.
+/// Tries, in order: a trace's entry (`hint` first, then `start`); a symbol path;
+/// a route or command (`GET /api/users`, `ipc scan_repo`, `scan_repo`), followed
+/// from its caller, else from its handler; a file, through a trace that starts in
+/// it. Returns the entry the narrator starts from (empty when nothing matched), the
+/// trace when the scanner has one, and how it matched.
+pub fn resolve_start(g: &Graph, traces: &[query::Trace], start: &str, hint: &str) -> (String, Option<query::Trace>, &'static str) {
+    let (start, hint) = (start.trim().trim_matches('`'), hint.trim().trim_matches('`'));
+    for s in [hint, start] {
+        if let Some(t) = traces.iter().find(|t| !s.is_empty() && t.entry_path == s) {
+            return (t.entry_path.clone(), Some(t.clone()), "trace");
+        }
+    }
+    if start.is_empty() {
+        return (String::new(), None, "none");
+    }
+    let traced = |id: NodeId| traces.iter().find(|t| t.entry == id).cloned().or_else(|| query::trace_from(g, id));
+    if start.contains('#')
+        && let Some(n) = g.find_by_path(start)
+    {
+        return match traced(n.id) {
+            Some(t) => (t.entry_path.clone(), Some(t), "trace"),
+            None => (n.path.clone(), None, "symbol"),
+        };
+    }
+    let keys = endpoint_keys(start);
+    if let Some(e) = query::endpoints(g).into_iter().find(|e| keys.contains(&e.key)) {
+        for r in e.callers.iter().chain(e.handlers.iter()) {
+            if let Some(t) = traced(r.id) {
+                return (t.entry_path.clone(), Some(t), "endpoint");
+            }
+        }
+        if let Some(r) = e.handlers.first().or(e.callers.first()) {
+            return (r.path.clone(), None, "endpoint");
+        }
+    }
+    let file = start.split('#').next().unwrap_or(start);
+    if let Some(n) = g.find_by_path(file).filter(|n| n.kind == NodeKind::File) {
+        return match traces.iter().find(|t| t.entry_path == file || t.entry_path.split('#').next() == Some(file)) {
+            Some(t) => (t.entry_path.clone(), Some(t.clone()), "file"),
+            None => (n.path.clone(), None, "file"),
+        };
+    }
+    (String::new(), None, "none")
+}
+
+/// The endpoint keys a route or command may be written as: `GET /api/users` and
+/// `/api/users` are `http /api/users`; a bare word is an IPC command or a queue topic.
+fn endpoint_keys(s: &str) -> Vec<String> {
+    let s = s.trim();
+    if s.contains(char::is_whitespace) {
+        let (head, rest) = s.split_once(char::is_whitespace).unwrap_or((s, ""));
+        let rest = rest.trim();
+        return match head.to_lowercase().as_str() {
+            "http" | "ipc" | "queue" => vec![format!("{} {rest}", head.to_lowercase())],
+            "get" | "post" | "put" | "patch" | "delete" => vec![format!("http {rest}")],
+            _ => vec![],
+        };
+    }
+    if s.starts_with('/') {
+        return vec![format!("http {s}")];
+    }
+    if s.contains(['/', '.', '#']) {
+        return vec![];
+    }
+    vec![format!("ipc {s}"), format!("queue {s}")]
 }
 
 /// The narrator's messages, resolved onto atlas ids. A message that matches one
@@ -971,6 +1170,7 @@ fn journey_from_answer(a: &Atlas, c: &Chosen, draft: &[atlas::Message], ans: Jou
         steps: vec![],
         source: "claude".into(),
         note: c.note.clone(),
+        why: c.why.clone(),
     };
     j.steps = atlas::steps_of(&j.messages);
     j
@@ -985,9 +1185,9 @@ pub fn narrate_one(g: &Graph, a: &Atlas, id: &str, note: &str, opts: &Options, r
     let chosen = match &existing {
         Some(j) => {
             let trace = if j.entry.is_empty() { None } else { traces.iter().find(|t| t.entry_path == j.entry).cloned().or_else(|| g.find_by_path(&j.entry).and_then(|n| query::trace_from(g, n.id))) };
-            Chosen { id: j.id.clone(), entry: j.entry.clone(), name: j.name.clone(), note: if note.trim().is_empty() { j.note.clone() } else { note.trim().to_string() }, trace }
+            Chosen { id: j.id.clone(), entry: j.entry.clone(), name: j.name.clone(), note: if note.trim().is_empty() { j.note.clone() } else { note.trim().to_string() }, why: j.why.clone(), trace }
         }
-        None => choose_flow(g, &traces, &FlowRequest { entry: if id.contains('#') { id.to_string() } else { String::new() }, name: if id.contains('#') { String::new() } else { id.to_string() }, note: note.to_string() }),
+        None => choose_flow(g, &traces, &FlowRequest { entry: if id.contains('#') { id.to_string() } else { String::new() }, name: if id.contains('#') { String::new() } else { id.to_string() }, note: note.to_string(), why: String::new() }),
     };
     // The draft is what stands now: the journey's own messages, else the trace's.
     let draft: Vec<atlas::Message> = match &existing {
@@ -995,7 +1195,7 @@ pub fn narrate_one(g: &Graph, a: &Atlas, id: &str, note: &str, opts: &Options, r
         _ => chosen.trace.as_ref().map(|t| atlas::messages_from_trace(a, t)).unwrap_or_default(),
     };
     progress(Progress::Stage { stage: "field".into() });
-    let call = AgentCall { role: "journey".into(), target: Some(chosen.id.clone()), prompt: journey_prompt(a, &chosen.name, &chosen.entry, chosen.trace.as_ref(), &draft, &chosen.note), schema: journey_schema(), tools: true };
+    let call = AgentCall { role: "journey".into(), target: Some(chosen.id.clone()), prompt: journey_prompt(a, &chosen, &draft), schema: journey_schema(), tools: true };
     let (run, value) = run_one(&call, &format!("Following {}", chosen.title()), runner, progress);
     let ans = match value {
         Some(v) if run.ok => serde_json::from_value::<JourneyAnswer>(v).map_err(|e| anyhow!("the narrator's answer did not match the schema: {e}"))?,
@@ -1011,6 +1211,99 @@ pub fn narrate_one(g: &Graph, a: &Atlas, id: &str, note: &str, opts: &Options, r
     }
     let cost = run.cost_usd;
     Ok((out, Run { model: opts.model.clone(), agents: vec![run], cost_usd: cost, secs: started.elapsed().as_secs_f64() }))
+}
+
+/// Run the scout alone: the key flows it proposes for the atlas as it stands,
+/// matched to the code, for a person to steer before anything else is spent.
+pub fn propose_flows(g: &Graph, a: &Atlas, opts: &Options, runner: &Runner, progress: &(dyn Fn(Progress) + Sync)) -> Result<(Vec<Proposal>, Run)> {
+    let started = Instant::now();
+    let traces = query::traces(g);
+    let ranked = atlas::rank_traces(g, &traces, 8);
+    progress(Progress::Stage { stage: "scout".into() });
+    let (run, found) = scout(g, a, &traces, &ranked, opts, runner, progress);
+    let Some(found) = found else {
+        bail!("{}", run.error.clone().unwrap_or_else(|| "the scout did not answer".into()));
+    };
+    let cost = run.cost_usd;
+    Ok((found.into_iter().map(|(p, _)| p).collect(), Run { model: opts.model.clone(), agents: vec![run], cost_usd: cost, secs: started.elapsed().as_secs_f64() }))
+}
+
+/// One scout, its proposals matched to the code, near copies dropped, spread
+/// across containers and capped at `max_journeys`. `None` when the agent failed or
+/// its answer did not match the schema.
+fn scout(g: &Graph, a: &Atlas, traces: &[query::Trace], ranked: &[query::Trace], opts: &Options, runner: &Runner, progress: &(dyn Fn(Progress) + Sync)) -> (AgentRun, Option<Vec<(Proposal, Option<query::Trace>)>>) {
+    let call = AgentCall { role: "scout".into(), target: None, prompt: scout_prompt(g, a, ranked, opts.max_journeys), schema: scout_schema(), tools: true };
+    let (mut run, value) = run_one(&call, "Scouting the key flows", runner, progress);
+    let ans = match value.map(serde_json::from_value::<ScoutAnswer>) {
+        Some(Ok(ans)) => ans,
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, "scout answer did not match the schema");
+            run.ok = false;
+            run.error = Some(format!("answer did not match the schema: {e}"));
+            return (run, None);
+        }
+        None => return (run, None),
+    };
+    let found = pick_proposals(ans.flows.into_iter().filter_map(|p| resolve_proposal(g, a, traces, p)).collect(), opts.max_journeys);
+    if !found.is_empty() {
+        progress(Progress::Proposed { flows: found.iter().map(|(p, _)| p.clone()).collect() });
+    }
+    (run, Some(found))
+}
+
+/// A proposal matched to the code, with the containers it passes through: the one
+/// its entry sits in first, then the trace's packages, then the ones the scout named.
+fn resolve_proposal(g: &Graph, a: &Atlas, traces: &[query::Trace], p: ProposalAnswer) -> Option<(Proposal, Option<query::Trace>)> {
+    let name = p.name.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let (entry, trace, matched) = resolve_start(g, traces, &p.start, &p.trace);
+    let comp_of = atlas::component_index(a);
+    let shown = |q: &str| a.containers.iter().find(|c| !c.hidden && (c.id == q || c.package.eq_ignore_ascii_case(q.trim()) || c.name.eq_ignore_ascii_case(q.trim()))).map(|c| c.id.clone());
+    let mut containers: Vec<String> = Vec::new();
+    let from_entry = comp_of.get(entry.split('#').next().unwrap_or(&entry)).and_then(|k| shown(k.rsplit_once('/').map(|(c, _)| c).unwrap_or(k)));
+    let lanes = trace.as_ref().map(|t| t.lanes.clone()).unwrap_or_default();
+    for id in from_entry.into_iter().chain(lanes.iter().filter_map(|l| shown(l))).chain(p.containers.iter().filter_map(|c| shown(c))) {
+        if !containers.contains(&id) {
+            containers.push(id);
+        }
+    }
+    let hops = trace.as_ref().map(|t| t.hops).unwrap_or(0);
+    Some((Proposal { name, why: p.why.trim().to_string(), start: p.start.trim().to_string(), entry, matched: matched.into(), hops, containers }, trace))
+}
+
+/// Drop near copies (one journey told twice: the same entry or trace, or the same
+/// name with no entry), then keep up to `cap` in the scout's order, preferring the
+/// ones that start in a container no earlier pick starts in.
+fn pick_proposals(all: Vec<(Proposal, Option<query::Trace>)>, cap: usize) -> Vec<(Proposal, Option<query::Trace>)> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let uniq: Vec<(Proposal, Option<query::Trace>)> = all.into_iter().filter(|(p, _)| seen.insert(atlas::journey_id(&p.entry, &p.name))).collect();
+    let mut take = vec![false; uniq.len()];
+    let mut starts: HashSet<String> = HashSet::new();
+    let mut n = 0;
+    for (i, (p, _)) in uniq.iter().enumerate() {
+        if n >= cap {
+            break;
+        }
+        match p.containers.first() {
+            Some(s) if !starts.insert(s.clone()) => {}
+            _ => {
+                take[i] = true;
+                n += 1;
+            }
+        }
+    }
+    for t in take.iter_mut() {
+        if n >= cap {
+            break;
+        }
+        if !*t {
+            *t = true;
+            n += 1;
+        }
+    }
+    uniq.into_iter().zip(take).filter_map(|(x, t)| t.then_some(x)).collect()
 }
 
 fn apply_container(a: &mut Atlas, ci: usize, ans: ContainerAnswer, claims: &mut Words) {

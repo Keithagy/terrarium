@@ -107,7 +107,8 @@ fn describe() -> Value {
             { "method": "POST", "path": "/journey/save",   "summary": "{journey} put a journey (the shape /atlas prints) into the atlas, checked and saved" },
             { "method": "POST", "path": "/journey/delete", "summary": "{journey} remove a journey (id or name)" },
             { "method": "POST", "path": "/journey/narrate", "summary": "{journey, note?, model?} have Claude narrate one journey again; blocks until done" },
-            { "method": "POST", "path": "/discover",       "summary": "{model?, flows?: [{entry?, name?, note?}]} have Claude discover the atlas (survey, one agent per container and journey, editor); flows steer which journeys are narrated; blocks until done" },
+            { "method": "POST", "path": "/discover",       "summary": "{model?, flows?: [{entry?, name?, note?, why?}]} have Claude discover the atlas (survey, scout, one agent per container and journey, editor); flows steer which journeys are narrated, and without them the scout proposes the key flows; blocks until done" },
+            { "method": "POST", "path": "/discover/propose", "summary": "{model?} have the scout propose the key flows (one agent, nothing saved); an open plan sheet fills with them; blocks until done" },
             { "method": "POST", "path": "/discover/reset", "summary": "forget Claude's atlas and use the engine's" },
             { "method": "POST", "path": "/reset",          "summary": "context level, no selection, no journey, fit" },
             { "method": "GET",  "path": "/screenshot",     "summary": "PNG of the window (?format=json for a data URL)" },
@@ -180,6 +181,7 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/journey/delete", post(journey_delete))
         .route("/journey/narrate", post(journey_narrate))
         .route("/discover", post(discover))
+        .route("/discover/propose", post(discover_propose))
         .route("/discover/reset", post(discover_reset))
         .route("/reset", post(reset))
         .route("/screenshot", get(screenshot))
@@ -416,6 +418,23 @@ async fn discover(State(ctx): State<Ctx>, body: Option<Json<DiscoverReq>>) -> Ap
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let ui = ask_frontend(&ctx, "state", json!({}), 2000).await.unwrap_or(Value::Null);
     Ok(Json(json!({ "run": run, "atlas": backend_state(&ctx)["atlas"], "ui": ui })))
+}
+
+#[derive(Deserialize)]
+struct ProposeReq {
+    model: Option<String>,
+}
+
+/// Runs the scout to completion, then reports what the plan sheet shows (it fills when open).
+async fn discover_propose(State(ctx): State<Ctx>, body: Option<Json<ProposeReq>>) -> ApiResult {
+    let app = ctx.app.clone();
+    let model = body.and_then(|b| b.0.model);
+    let v = tauri::async_runtime::spawn_blocking(move || commands::do_propose(&app, model))
+        .await
+        .map_err(|e| e.to_string())??;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let ui = ask_frontend(&ctx, "ui", json!({}), 2000).await.unwrap_or(Value::Null);
+    Ok(Json(json!({ "proposals": v["proposals"], "run": v["run"], "plan": ui["plan"] })))
 }
 
 async fn discover_reset(State(ctx): State<Ctx>) -> ApiResult {

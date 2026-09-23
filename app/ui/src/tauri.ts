@@ -3,7 +3,7 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AtlasView, CacheEntry, FlowRequest, Journey, NodeDetail, ScanDone } from "./types";
+import type { AtlasView, CacheEntry, FlowRequest, Journey, NodeDetail, ProposeDone, ScanDone } from "./types";
 
 export const inTauri = isTauri();
 
@@ -23,6 +23,7 @@ export const api = {
   getAtlas: () => call<AtlasView>("get_atlas"),
   atlasDsl: () => call<string>("atlas_dsl"),
   discoverWithClaude: (model?: string, flows: FlowRequest[] = []) => call<unknown>("discover_with_claude", { model, flows }),
+  proposeFlows: (model?: string) => call<ProposeDone>("propose_flows", { model }),
   resetAtlas: () => call<AtlasView>("reset_atlas"),
   saveJourney: (journey: Journey) => call<AtlasView>("save_journey", { journey }),
   deleteJourney: (journey: string) => call<AtlasView>("delete_journey", { journey }),

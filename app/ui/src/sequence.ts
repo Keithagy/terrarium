@@ -84,6 +84,7 @@ function renderHead(j: Journey): void {
     </div>
     <h2 data-testid="seq-title">${esc(j.name || "Untitled journey")}</h2>
     ${j.summary ? `<p class="seq-summary">${prose(j.summary)}</p>` : ""}
+    ${j.why ? `<p class="seq-why" data-testid="seq-why" title="Why the scout chose this flow">Why it matters: ${esc(j.why)}</p>` : ""}
     ${j.note ? `<p class="seq-note" title="What you asked the narrator to pay attention to">✎ ${esc(j.note)}</p>` : ""}
     <div class="seq-actions">
       ${editing ? "" : `<button class="ghost" data-testid="seq-edit" ${narrating ? "disabled" : ""}>Edit</button>`}

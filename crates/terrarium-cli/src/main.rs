@@ -160,10 +160,10 @@ enum Cmd {
         #[arg(long)]
         model: Option<String>,
     },
-    /// Have Claude discover the atlas: a surveyor reads the manifests and entry points,
-    /// one agent per container groups its code into components, one agent per journey
-    /// narrates a path across the system, an editor writes the guide, and the engine
-    /// checks every relationship against the code. Saves the atlas for the app. Spends money.
+    /// Have Claude discover the atlas: a surveyor reads the manifests and entry points, a scout
+    /// proposes the key flows (unless `--flow` names them), one agent per container groups its
+    /// code into components, one agent per journey narrates a path across the system, an
+    /// editor writes the guide, and the engine checks every relationship against the code. Saves the atlas for the app. Spends money.
     /// Examples: `terrarium discover`, `terrarium discover --model claude-opus-5-5`, `terrarium discover --reset`.
     Discover {
         /// Model for the agents (default claude-opus-5-5, or TERRARIUM_DISCOVERY_MODEL).
@@ -175,17 +175,30 @@ enum Cmd {
         /// Spending cap per agent, in US dollars.
         #[arg(long, default_value_t = 2.0)]
         budget: f64,
-        /// Journeys to narrate (when the survey picks them).
+        /// Journeys to narrate, at most (when the scout proposes them).
         #[arg(long, default_value_t = 4)]
         journeys: usize,
-        /// A flow to narrate, instead of letting the survey pick: an entry (`web/src/app.ts#main`)
-        /// or a name (`Sign up`), with an optional note after ` :: `. Repeat for more.
+        /// A flow to narrate, instead of letting the scout propose them: an entry (`web/src/app.ts#main`),
+        /// a name (`Sign up`), or both (`Sign up @ api/main.py#post_user`), with an optional note
+        /// after ` :: `. Repeat for more.
         /// Example: `--flow "web/src/app.ts#main :: watch the users list" --flow "Nightly cleanup"`.
         #[arg(long)]
         flow: Vec<String>,
         /// Forget the saved atlas and use the engine's.
         #[arg(long)]
         reset: bool,
+    },
+    /// Have Claude scout the key flows: one agent reads where flows begin (routes, commands,
+    /// jobs, handlers, UI actions) and proposes the journeys worth narrating, each matched to a
+    /// trace the scanner found, or left for the narrator to find in the code. Saves nothing.
+    /// Spends a little money. Pass the ones you keep to `terrarium discover --flow`.
+    /// Examples: `terrarium propose`, `terrarium propose --journeys 6`.
+    Propose {
+        #[arg(long)]
+        model: Option<String>,
+        /// Flows to propose, at most.
+        #[arg(long, default_value_t = 4)]
+        journeys: usize,
     },
     /// Check the toolchain, Claude Code, cache and app bridge.
     Doctor,
@@ -279,6 +292,12 @@ enum AppCmd {
         /// Forget the saved atlas and use the engine's.
         #[arg(long)]
         reset: bool,
+    },
+    /// Have Claude scout the key flows in the app (blocks; spends a little money). An open plan
+    /// sheet fills with the proposals.
+    Propose {
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Save a PNG screenshot of the window.
     Screenshot {
@@ -794,6 +813,25 @@ fn run(cli: Cli) -> Result<Value> {
             }
             Ok(v)
         }
+        Some(Cmd::Propose { model, journeys }) => {
+            let g = load_graph(&root)?;
+            let groot = Path::new(&g.root).to_path_buf();
+            let (a, _) = atlas::for_graph(&g, cache::load_atlas(&groot));
+            let mut opts = discovery::Options { max_journeys: journeys, ..discovery::Options::default() };
+            if let Some(m) = model {
+                opts.model = m;
+            }
+            let runner = discovery::claude_runner(&groot, &opts);
+            let progress = |p: discovery::Progress| {
+                if !matches!(p, discovery::Progress::Proposed { .. }) {
+                    eprintln!("{}", serde_json::to_string(&p).unwrap_or_default());
+                }
+            };
+            let (proposals, run) = discovery::propose_flows(&g, &a, &opts, &runner, &progress)?;
+            let mut v = proposals_value(&a, &proposals);
+            v["run"] = run_value(&run);
+            Ok(v)
+        }
         Some(Cmd::Narrate { journey, note, model }) => {
             let g = load_graph(&root)?;
             let groot = Path::new(&g.root).to_path_buf();
@@ -865,14 +903,39 @@ fn run_value(run: &discovery::Run) -> Value {
     })
 }
 
-/// `entry-or-name [:: note]` as a flow request.
+/// `entry-or-name [:: note]`, or `name @ entry [:: note]`, as a flow request.
 fn parse_flow(s: &str) -> discovery::FlowRequest {
     let (head, note) = s.split_once(" :: ").map(|(h, n)| (h.trim(), n.trim())).unwrap_or((s.trim(), ""));
-    if head.contains('#') {
-        discovery::FlowRequest { entry: head.into(), name: String::new(), note: note.into() }
+    let note = note.to_string();
+    if let Some((name, entry)) = head.split_once(" @ ") {
+        discovery::FlowRequest { entry: entry.trim().into(), name: name.trim().into(), note, ..Default::default() }
+    } else if head.contains('#') {
+        discovery::FlowRequest { entry: head.into(), note, ..Default::default() }
     } else {
-        discovery::FlowRequest { entry: String::new(), name: head.into(), note: note.into() }
+        discovery::FlowRequest { name: head.into(), note, ..Default::default() }
     }
+}
+
+/// The scout's proposals as rows, with the `--flow` that keeps each one.
+fn proposals_value(a: &Atlas, proposals: &[discovery::Proposal]) -> Value {
+    let flag = |p: &discovery::Proposal| if p.entry.is_empty() { format!("--flow \"{}\"", p.name) } else { format!("--flow \"{} @ {}\"", p.name, p.entry) };
+    let mut help: Vec<String> = Vec::new();
+    if !proposals.is_empty() {
+        help.push(format!("Run `terrarium discover {}` to narrate these (spends money); drop or reword any flow, add ` :: <note>` to steer one", proposals.iter().map(flag).collect::<Vec<_>>().join(" ")));
+    }
+    help.push("Run `terrarium discover` to let the scout pick again inside a full discovery (spends money)".into());
+    json!({
+        "proposed": format!("{} {}", proposals.len(), if proposals.len() == 1 { "flow" } else { "flows" }),
+        "flows": proposals.iter().map(|p| json!({
+            "name": p.name,
+            "entry": if p.entry.is_empty() { "(the narrator finds it)".to_string() } else { p.entry.clone() },
+            "matched": p.matched,
+            "hops": p.hops,
+            "containers": p.containers.iter().map(|c| element_name(a, c)).collect::<Vec<_>>().join(", "),
+            "why": p.why,
+        })).collect::<Vec<_>>(),
+        "help": help,
+    })
 }
 
 fn find_journey<'a>(a: &'a Atlas, q: &str) -> Result<&'a atlas::Journey> {
@@ -903,7 +966,7 @@ fn level_focus(a: &Atlas, level: LevelArg, container: Option<&str>) -> Result<(&
 fn journey_value(a: &Atlas, j: &atlas::Journey, level: &str, focus: Option<&str>) -> Result<Value> {
     let p = atlas::project(a, j, level, focus);
     Ok(json!({
-        "journey": { "id": j.id, "name": j.name, "summary": j.summary, "entry": j.entry, "source": j.source, "note": j.note, "messages": j.messages.len(), "claimed": j.messages.iter().filter(|m| m.source == "claimed").count() },
+        "journey": { "id": j.id, "name": j.name, "summary": j.summary, "entry": j.entry, "source": j.source, "note": j.note, "why": j.why, "messages": j.messages.len(), "claimed": j.messages.iter().filter(|m| m.source == "claimed").count() },
         "level": p.level,
         "focus": focus.map(|f| element_name(a, f)),
         "participants": p.participants.iter().map(|id| json!({ "id": id, "name": element_name(a, id) })).collect::<Vec<_>>(),
@@ -969,6 +1032,7 @@ fn atlas_value(a: &Atlas, stale: Option<&str>, level: LevelArg, container: Optio
         let mut help = vec!["Run `terrarium atlas --level context` for people and outside systems".to_string(), "Run `terrarium atlas --level components --container <name>` for one container's components".to_string()];
         if a.source == "engine" {
             help.push("Run `terrarium discover` to have Claude read the code and name every part (spends money)".into());
+            help.push("Run `terrarium propose` to see which flows Claude would narrate first (spends a little)".into());
         } else {
             help.push("Run `terrarium discover --reset` to go back to the engine's atlas".into());
         }
@@ -1161,6 +1225,15 @@ fn app(cmd: AppCmd) -> Result<Value> {
             } else {
                 b.post_long("/discover", json!({ "model": model, "flows": flow.iter().map(|f| parse_flow(f)).collect::<Vec<_>>() }))
             }
+        }
+        AppCmd::Propose { model } => {
+            let v = b.post_long("/discover/propose", json!({ "model": model }))?;
+            let a: Atlas = serde_json::from_value(b.get("/atlas")?["atlas"].clone()).context("the app returned an atlas this CLI cannot read")?;
+            let proposals: Vec<discovery::Proposal> = serde_json::from_value(v["proposals"].clone()).context("the app returned proposals this CLI cannot read")?;
+            let mut out = proposals_value(&a, &proposals);
+            out["run"] = v["run"].clone();
+            out["plan"] = v["plan"].clone();
+            Ok(out)
         }
         AppCmd::Screenshot { out } => {
             let bytes = b.get_bytes("/screenshot")?;

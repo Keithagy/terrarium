@@ -51,8 +51,10 @@ terrarium atlas --level components --container api
 terrarium atlas --dsl                            # Structurizr DSL
 terrarium atlas --journey j:web-src-app-ts-main  # one journey as a sequence: participants and messages at a level
 terrarium atlas --journey "Sign up" --level components --container api --mermaid
-terrarium discover                               # Claude discovers the atlas (spends money)
+terrarium propose                                # the scout proposes the key flows, matched to the code (spends a little)
+terrarium discover                               # Claude discovers the atlas; the scout picks the flows (spends money)
 terrarium discover --flow "web/src/app.ts#main :: watch the users list" --flow "Nightly cleanup"
+terrarium discover --flow "Check the API is up @ api/main.py#health"   # a name and an entry, as `propose` prints them
 terrarium narrate "Sign up" --note "show the welcome email"   # one narrator rewrites one journey (spends money)
 terrarium discover --reset                       # back to the engine's atlas
 ```
@@ -73,11 +75,24 @@ follows its files when components are regrouped, so a journey survives a redisco
 A journey's `source` says who last wrote it; a person's journeys (`user`) ride along
 untouched through `discover`.
 
-Steering: `--flow` chooses what the narrators follow (an entry the scanner traced, or a
-name the narrator must find in the code) with a note each; in the app the Discover
-button opens a plan sheet first. Editing: the sequence view's Edit drawer changes
-messages by hand (arrows are picked from the atlas's elements), and Narrate again sends
-one narrator with a note.
+Key flows: unless the person chose the flows, a scout agent runs after the survey. It
+reads where flows begin (routes, commands, jobs, queue consumers, UI actions, the README)
+and proposes up to `--journeys` flows, each with a name, why it matters, and where it
+starts. The engine matches each start to the code: a trace's entry, a symbol, a route or
+command (followed from its caller, else its handler), or a file. A flow the scanner cannot
+trace is still narrated: the narrator starts at the symbol or file, or finds the start
+itself. Near copies are dropped and flows that start in different containers come first.
+When the scout fails, the survey's picks stand. A narrated journey keeps the scout's
+reason in `why`. Without agents, the engine ranks traces the same way: a recognisable
+start (route handler, IPC command, `main`, UI action) first, then whatever adds a new
+starting package or new boundaries, with length only breaking ties.
+
+Steering: `terrarium propose` (or Propose with Claude in the plan sheet) runs the scout
+alone, so a person starts from its picks. `--flow` chooses what the narrators follow (an
+entry the scanner traced, a name the narrator must find in the code, or `name @ entry`)
+with a note each; in the app the Discover button opens a plan sheet first. Editing: the
+sequence view's Edit drawer changes messages by hand (arrows are picked from the atlas's
+elements), and Narrate again sends one narrator with a note.
 
 ## Interacting with the app
 
@@ -92,6 +107,7 @@ terrarium app narrate "Sign up" --note "..."     # one narrator rewrites it in t
 terrarium app journey-save --file j.json         # put a journey (the shape `app atlas` prints) in, checked and saved
 terrarium app journey-delete "Sign up"
 terrarium app search fetch                       # types into the search box, returns the results
+terrarium app propose                            # the scout proposes key flows; an open plan sheet fills (blocks; spends a little)
 terrarium app discover                           # Claude discovers the atlas in the app (blocks; spends money)
 terrarium app discover --reset
 terrarium app atlas                              # the atlas the app is showing (--dsl for DSL)
@@ -105,19 +121,20 @@ Every `data-testid` in the UI is listed by `terrarium app ui`. Stable ones:
 `search`, `tab-map|journeys|guide`, `map-<element id>`, `journey-<journey id>`,
 `level-context|containers|components|code`, `crumb-context|containers|components|code`,
 `fit`, `c4-<element id>` (a box on the diagram), `discover-claude`, `copy-dsl`, `notes`,
-`notes-close`, `notes-reset`, `stage-survey|field|editor|verify`, `agent-<role>:<target>`,
+`notes-close`, `notes-reset`, `stage-survey|scout|field|editor|verify`, `agent-<role>:<target>`,
 `card`, `card-title`, `card-path`, `card-zoom`, `card-close`, `rel-<from>><to>`,
 `nb-<element id>`, `code-title`, `files`, `file-<path>`, `open-<path>`, `journey-bar`,
 `journey-prev|next|all|close|range|title|count|caption|edit`, `journey-new`,
 `journey-<journey id>-sequence`, `view-map|sequence`, `sequence`, `seq-title`, `seq-source`,
-`seq-edit|narrate|mermaid|map`, `seq-note`, `seq-narrate-go`, `seq-<participant id>`,
+`seq-edit|narrate|mermaid|map`, `seq-note`, `seq-why`, `seq-narrate-go`, `seq-<participant id>`,
 `msg-<n>`, `editor`, `ed-name|summary|note|add|save|cancel|delete`,
-`ed-msg-<n>-from|to|kind|label|caption|remove`, `plan`, `plan-flow-<n>-on|name|note`,
-`plan-new-name|note`, `plan-add|run|cancel|summary`, `bridge`, `open-repo`,
+`ed-msg-<n>-from|to|kind|label|caption|remove`, `plan`, `plan-flow-<n>-on|name|note|why`,
+`plan-new-name|note`, `plan-add|run|cancel|summary|propose|proposing`, `bridge`, `open-repo`,
 `recent-repo`, `toast`.
 
 `terrarium app ui` also reports `sequence` (participants and messages drawn, with the
-current one) while the sequence view is on, and `view`, `editing` and `narrating` in the
+current one) while the sequence view is on, `plan` (open, proposing, and the rows with
+name, entry, why and whether each is ticked), and `view`, `editing` and `narrating` in the
 state.
 
 Element ids: `s` (the system), `p:<slug>` (a person), `x:<slug>` (an outside system),
@@ -150,11 +167,15 @@ with read-only tools, a JSON schema per answer, streamed output) on
 `claude-opus-5-5` by default. The fixture takes a few minutes and a few dollars; a real
 repository scales with its containers. Set `TERRARIUM_DISCOVERY_MODEL` to change the
 model and `TERRARIUM_CLAUDE` to point at a `claude` binary or a stand-in. The app emits
-`discover:progress` events (`started`, `stage`, `agent_started`, `agent_activity`,
-`agent_done`, `survey_done`, `container_done`, `journey_done`, `verified`) which the
-field notes panel renders; `terrarium app ui` reports `discovery` and `notes` while a
-run is on. `POST /discover` takes `flows` (`[{entry?, name?, note?}]`) to steer which
-journeys are narrated. One journey narrated again (`POST /journey/narrate`) emits
+`discover:progress` events (`started` with `scout`, `stage` (`survey`, `scout`, `field`,
+`editor`, `verify`), `agent_started`, `agent_activity`, `agent_done`, `survey_done`,
+`proposed` (the scout's flows, matched to the code), `container_done`, `journey_done`,
+`verified`) which the field notes panel renders; `terrarium app ui` reports `discovery`
+and `notes` while a run is on. `POST /discover` takes `flows` (`[{entry?, name?, note?,
+why?}]`) to steer which journeys are narrated; with none, the scout proposes them. `POST
+/discover/propose` runs the scout alone and emits `propose:started`, `propose:progress`
+(the agent's progress events), then `propose:done` (`{proposals, run}`) or
+`propose:error`. One journey narrated again (`POST /journey/narrate`) emits
 `journey:started`, the agent's `discover:progress` events, then `journey:done` or
 `journey:error`.
 
@@ -180,7 +201,7 @@ journeys are narrated. One journey narrated again (`POST /journey/narrate`) emit
 - Atlas: `crates/terrarium-core/src/atlas.rs` (the C4 model, the engine's draft, the
   check against the graph, journeys as messages from traces, their projection onto each
   level, Structurizr and Mermaid export). Discovery:
-  `src/discovery.rs` (survey, field, editor; prompts and schemas; the streaming
+  `src/discovery.rs` (survey, scout, field, editor; prompts and schemas; the streaming
   `claude -p` runner; the runner is injectable, and `tests/discovery.rs` drives it with
   stand-ins).
 - App: `app/src-tauri/src/{commands,bridge,telemetry,snapshot}.rs`.

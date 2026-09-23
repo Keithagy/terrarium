@@ -15,10 +15,32 @@ fn files_in(prompt: &str) -> Vec<String> {
     prompt.lines().filter_map(|l| l.trim().split_once(". ").and_then(|(n, rest)| n.parse::<u32>().ok().map(|_| rest))).filter(|r| r.contains(" lines)")).map(|r| r.split(" (").next().unwrap().to_string()).collect()
 }
 
-/// Stand-in agents: a surveyor that names things, container agents that group
-/// files (one is careless), a journey narrator, an editor, and one that fails.
+/// Stand-in agents: a surveyor that names things, a scout that proposes flows
+/// (traced, untraced, and near copies), container agents that group files (one is
+/// careless), a journey narrator, an editor, and one that fails.
 fn agents(call: &AgentCall, sink: &(dyn Fn(AgentEvent) + Sync)) -> anyhow::Result<(Value, f64)> {
     match call.role.as_str() {
+        "scout" => {
+            assert!(call.tools);
+            assert!(call.prompt.starts_with("You are scouting"), "{}", call.prompt);
+            assert!(call.prompt.contains("- web/src/app.ts#main (4 boundaries"), "the scout sees the traces: {}", call.prompt);
+            assert!(call.prompt.contains("http /api/health (no-callers)"), "and the endpoints: {}", call.prompt);
+            assert!(call.prompt.contains("Participants on the diagrams"));
+            sink(AgentEvent::Reading { path: "api/main.py".into() });
+            Ok((json!({ "flows": [
+                { "name": "Open the page and scan a repository", "why": "It crosses every container once.", "start": "web/src/app.ts#main", "containers": ["polyglot-web", "polyglot-api"], "trace": "web/src/app.ts#main" },
+                // a near copy: the same trace, reached through its file
+                { "name": "Load the page", "why": "The page loads.", "start": "web/src/app.ts", "containers": ["polyglot-web"], "trace": "" },
+                // traced, but it starts in the web app again: it waits behind the others
+                { "name": "Look up one user", "why": "One user's page.", "start": "web/src/api.ts#fetchUser", "containers": ["polyglot-web"], "trace": "web/src/api.ts#fetchUser" },
+                // a route nothing in the repository calls: no trace, the narrator starts at its handler
+                { "name": "Check the API is up", "why": "Operators poll it.", "start": "GET /api/health", "containers": ["polyglot-api"], "trace": "" },
+                // no start at all: the narrator finds it in the code
+                { "name": "Nightly cleanup", "why": "Old jobs pile up without it.", "start": "", "containers": ["worker"], "trace": "" },
+                { "name": "Sync the jobs", "why": "The desktop shell keeps its jobs current.", "start": "native/src/lib.rs#run", "containers": ["polyglot-native"], "trace": "native/src/lib.rs#run" },
+                { "name": "", "why": "nameless", "start": "", "containers": [], "trace": "" }
+            ] }), 0.05))
+        }
         "survey" => {
             sink(AgentEvent::Reading { path: "README.md".into() });
             Ok((json!({
@@ -68,6 +90,14 @@ fn agents(call: &AgentCall, sink: &(dyn Fn(AgentEvent) + Sync)) -> anyhow::Resul
                     { "from": "Jobs worker", "to": "PostgreSQL", "kind": "store", "label": "deletes old jobs", "caption": "The worker deletes jobs older than a week." }
                 ] }), 0.12));
             }
+            if call.target.as_deref() == Some("j:api-main-py-health") {
+                assert!(call.prompt.contains("It starts at `api/main.py#health`"), "{}", call.prompt);
+                assert!(call.prompt.contains("Why it matters: Operators poll it."), "{}", call.prompt);
+                return Ok((json!({ "name": "Check the API is up", "summary": "An operator asks the API whether it is up.", "messages": [
+                    { "from": "Developer", "to": "Users API", "kind": "call", "label": "GET /api/health", "caption": "The operator asks." },
+                    { "from": "Users API", "to": "Developer", "kind": "return", "label": "ok", "caption": "The API says it is up." }
+                ] }), 0.12));
+            }
             assert!(call.prompt.contains("The engine's draft of the messages"), "{}", call.prompt);
             Ok((json!({ "name": if note.is_some() { "Open the page, with a note" } else { "Open the page and scan a repository" }, "summary": "The page loads users, then asks the desktop shell to scan a path.", "messages": [
                 { "from": "Developer", "to": "Web front end", "kind": "call", "label": "opens the page", "caption": "The developer opens the page." },
@@ -93,11 +123,12 @@ fn agents_write_the_words_and_the_engine_checks_them() {
     let progress = |p: Progress| seen.lock().unwrap().push(serde_json::to_value(&p).unwrap());
     let (a, run) = discovery::discover(&g, &Options { parallel: 3, max_journeys: 2, ..Options::default() }, &agents, &progress).unwrap();
 
-    // one survey, four containers (one failed), two journeys, one editor
-    assert_eq!(run.agents.len(), 8, "{:#?}", run.agents.iter().map(|r| format!("{} {:?} {}", r.role, r.target, r.ok)).collect::<Vec<_>>());
+    // one survey, one scout (nobody chose the flows), four containers (one failed), two journeys, one editor
+    assert_eq!(run.agents.len(), 9, "{:#?}", run.agents.iter().map(|r| format!("{} {:?} {}", r.role, r.target, r.ok)).collect::<Vec<_>>());
     let worker = run.agents.iter().find(|r| r.target.as_deref() == Some("c:worker")).unwrap();
     assert!(!worker.ok && worker.error.as_deref().unwrap().contains("600s"));
-    assert!((run.cost_usd - (0.30 + 3.0 * 0.25 + 2.0 * 0.15 + 0.10)).abs() < 1e-9);
+    // the scout's first two picks: the traced page load, and the health check it found with no trace
+    assert!((run.cost_usd - (0.30 + 0.05 + 3.0 * 0.25 + 0.15 + 0.12 + 0.10)).abs() < 1e-9, "{}", run.cost_usd);
     assert_eq!(run.agents.iter().find(|r| r.role == "survey").unwrap().reads, 1);
 
     // the survey's words
@@ -148,8 +179,9 @@ fn agents_write_the_words_and_the_engine_checks_them() {
     let worker_claim = ms.iter().find(|m| m.from == "c:worker" && m.to == "c:polyglot-native").unwrap();
     assert_eq!(worker_claim.source, "claimed", "nothing joins the worker to the desktop shell");
     assert!(ms.iter().all(|m| m.from != "Nowhere" && m.caption != "does not exist"), "unknown participants are dropped");
-    // the second journey had no narrator answer beyond the stand-in's default: the engine's messages stand
-    assert_eq!(a.journeys[1].source, "claude");
+    assert_eq!(j.why, "It crosses every container once.", "the journey keeps why the scout chose it");
+    // the second journey is one the scanner cannot trace: the scout found it, the narrator followed it
+    assert_eq!((a.journeys[1].id.as_str(), a.journeys[1].entry.as_str(), a.journeys[1].source.as_str()), ("j:api-main-py-health", "api/main.py#health", "claude"));
     // the guide resolves names to ids and drops what does not exist
     let starts: Vec<&str> = a.guide.start_here.iter().map(|p| p.element.as_str()).collect();
     assert_eq!(starts, ["c:polyglot-web", j.id.as_str()]);
@@ -159,7 +191,8 @@ fn agents_write_the_words_and_the_engine_checks_them() {
     let events: Vec<String> = seen.lock().unwrap().iter().map(|e| e["event"].as_str().unwrap().to_string()).collect();
     assert_eq!(events[0], "started");
     let stages: Vec<&String> = events.iter().filter(|e| *e == "stage").collect();
-    assert_eq!(stages.len(), 4);
+    assert_eq!(stages.len(), 5, "survey, scout, field, editor, verify");
+    assert_eq!(events.iter().filter(|e| *e == "proposed").count(), 1);
     assert!(events.iter().any(|e| e == "agent_activity"));
     assert_eq!(events.iter().filter(|e| *e == "container_done").count(), 3);
     assert_eq!(events.iter().filter(|e| *e == "journey_done").count(), 2);
@@ -178,8 +211,8 @@ fn a_person_steers_which_flows_are_narrated_and_keeps_their_own() {
     kept.name = "My own journey".into();
     kept.source = "user".into();
     let flows = vec![
-        FlowRequest { entry: "web/src/app.ts#main".into(), name: "Open the page".into(), note: "watch the users list".into() },
-        FlowRequest { entry: String::new(), name: "Nightly cleanup".into(), note: "there is no trace; read the worker".into() },
+        FlowRequest { entry: "web/src/app.ts#main".into(), name: "Open the page".into(), note: "watch the users list".into(), ..FlowRequest::default() },
+        FlowRequest { entry: String::new(), name: "Nightly cleanup".into(), note: "there is no trace; read the worker".into(), ..FlowRequest::default() },
     ];
     let prompts = Mutex::new(Vec::<String>::new());
     let runner = |call: &AgentCall, sink: &(dyn Fn(AgentEvent) + Sync)| {
@@ -192,6 +225,7 @@ fn a_person_steers_which_flows_are_narrated_and_keeps_their_own() {
     assert!(prompts.iter().any(|p| p.starts_with("survey:") && p.contains("chosen the journeys to narrate") && p.contains("Nightly cleanup")));
     assert!(prompts.iter().any(|p| p.starts_with("journey:") && p.contains("steering this atlas says: watch the users list")));
     assert_eq!(run.agents.iter().filter(|r| r.role == "journey").count(), 2, "the person's flows, not max_journeys, decide");
+    assert!(run.agents.iter().all(|r| r.role != "scout"), "the person chose the flows: no scout");
     let ids: Vec<&str> = a.journeys.iter().map(|j| j.id.as_str()).collect();
     assert_eq!(ids, ["j:web-src-app-ts-main", "j:nightly-cleanup", "j:mine"], "{ids:?}");
     assert_eq!(a.journeys[0].name, "Open the page, with a note");
@@ -205,6 +239,113 @@ fn a_person_steers_which_flows_are_narrated_and_keeps_their_own() {
     assert!(!mine.messages.is_empty(), "the kept journey's messages were re-resolved onto the new components: {:#?}", mine.messages);
     let ids: Vec<String> = a.containers.iter().flat_map(|c| std::iter::once(c.id.clone()).chain(c.components.iter().map(|k| k.id.clone()))).chain(a.people.iter().map(|p| p.id.clone())).chain(a.externals.iter().map(|x| x.id.clone())).collect();
     assert!(mine.messages.iter().all(|m| ids.contains(&m.from) && ids.contains(&m.to)), "{:#?}", mine.messages);
+}
+
+#[test]
+fn the_scout_proposes_key_flows_and_the_narrators_follow_them() {
+    let g = fixture();
+    let prompts = Mutex::new(Vec::<String>::new());
+    let runner = |call: &AgentCall, sink: &(dyn Fn(AgentEvent) + Sync)| {
+        prompts.lock().unwrap().push(format!("{}:{}", call.role, call.prompt));
+        agents(call, sink)
+    };
+    let seen = Mutex::new(Vec::<Value>::new());
+    let progress = |p: Progress| seen.lock().unwrap().push(serde_json::to_value(&p).unwrap());
+    let (a, run) = discovery::discover(&g, &Options { parallel: 3, max_journeys: 4, ..Options::default() }, &runner, &progress).unwrap();
+    // near copies dropped, the web app's second flow left out for flows that start elsewhere, the scout's order kept
+    let ids: Vec<&str> = a.journeys.iter().map(|j| j.id.as_str()).collect();
+    assert_eq!(ids, ["j:web-src-app-ts-main", "j:api-main-py-health", "j:nightly-cleanup", "j:native-src-lib-rs-run"], "{ids:?}");
+    assert_eq!(run.agents.iter().filter(|r| r.role == "journey").count(), 4);
+    let cleanup = a.journeys.iter().find(|j| j.id == "j:nightly-cleanup").unwrap();
+    assert_eq!((cleanup.entry.as_str(), cleanup.why.as_str()), ("", "Old jobs pile up without it."), "no start: narrated from the code, and the why stays");
+    let sync = a.journeys.iter().find(|j| j.id == "j:native-src-lib-rs-run").unwrap();
+    assert_eq!(sync.why, "The desktop shell keeps its jobs current.");
+    let prompts = prompts.lock().unwrap();
+    assert!(prompts.iter().any(|p| p.starts_with("journey:") && p.contains("Why it matters: It crosses every container once.")), "narrators read why");
+    // the proposals, as the field notes see them
+    let seen = seen.lock().unwrap();
+    let started = seen.iter().find(|e| e["event"] == "started").unwrap();
+    assert_eq!((started["scout"].as_bool(), started["journeys"].as_u64()), (Some(true), Some(4)));
+    let proposed = seen.iter().find(|e| e["event"] == "proposed").unwrap();
+    let flows = proposed["flows"].as_array().unwrap();
+    assert_eq!(flows.len(), 4);
+    assert_eq!((flows[0]["matched"].as_str(), flows[0]["hops"].as_u64(), flows[0]["containers"][0].as_str()), (Some("trace"), Some(4), Some("c:polyglot-web")));
+    assert_eq!((flows[1]["matched"].as_str(), flows[1]["entry"].as_str(), flows[1]["containers"][0].as_str()), (Some("endpoint"), Some("api/main.py#health"), Some("c:polyglot-api")));
+    assert_eq!((flows[2]["matched"].as_str(), flows[2]["entry"].as_str(), flows[2]["containers"][0].as_str()), (Some("none"), Some(""), Some("c:worker")));
+    let stages: Vec<&str> = seen.iter().filter(|e| e["event"] == "stage").map(|e| e["stage"].as_str().unwrap()).collect();
+    assert_eq!(stages, ["survey", "scout", "field", "editor", "verify"]);
+    assert!(seen.iter().any(|e| e["event"] == "agent_activity" && e["role"] == "scout" && e["path"] == "api/main.py"));
+}
+
+#[test]
+fn when_the_scout_fails_the_survey_picks_stand() {
+    let g = fixture();
+    for broken in [json!(null), json!({ "flows": "not a list" })] {
+        let runner = |call: &AgentCall, sink: &(dyn Fn(AgentEvent) + Sync)| -> anyhow::Result<(Value, f64)> {
+            if call.role == "scout" {
+                if broken.is_null() {
+                    anyhow::bail!("the scout could not start");
+                }
+                return Ok((broken.clone(), 0.01));
+            }
+            agents(call, sink)
+        };
+        let (a, run) = discovery::discover(&g, &Options { parallel: 2, max_journeys: 2, ..Options::default() }, &runner, &|_| {}).unwrap();
+        let scout = run.agents.iter().find(|r| r.role == "scout").unwrap();
+        assert!(!scout.ok, "{:?}", scout);
+        // the survey's pick first, then the traces the engine ranks best
+        let ids: Vec<&str> = a.journeys.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(ids, ["j:web-src-app-ts-main", "j:native-src-lib-rs-run"], "{ids:?}");
+        assert!(a.journeys.iter().all(|j| j.why.is_empty()));
+    }
+}
+
+#[test]
+fn the_scout_runs_alone_so_a_person_steers_from_its_proposals() {
+    let g = fixture();
+    let base = atlas::engine_atlas(&g);
+    let seen = Mutex::new(Vec::<String>::new());
+    let progress = |p: Progress| seen.lock().unwrap().push(serde_json::to_value(&p).unwrap()["event"].as_str().unwrap().to_string());
+    let (proposals, run) = discovery::propose_flows(&g, &base, &Options { max_journeys: 3, ..Options::default() }, &agents, &progress).unwrap();
+    assert_eq!(run.agents.len(), 1);
+    assert_eq!(run.agents[0].role, "scout");
+    assert!((run.cost_usd - 0.05).abs() < 1e-9);
+    let names: Vec<&str> = proposals.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Open the page and scan a repository", "Check the API is up", "Nightly cleanup"]);
+    assert_eq!(*seen.lock().unwrap(), ["stage", "agent_started", "agent_activity", "agent_done", "proposed"]);
+    // a proposal is a flow the person can hand straight to discovery
+    let flows: Vec<FlowRequest> = proposals.iter().map(|p| p.flow()).collect();
+    assert_eq!((flows[0].entry.as_str(), flows[0].why.as_str()), ("web/src/app.ts#main", "It crosses every container once."));
+    let (a, run) = discovery::discover(&g, &Options { parallel: 2, flows, ..Options::default() }, &agents, &|_| {}).unwrap();
+    assert!(run.agents.iter().all(|r| r.role != "scout"));
+    let ids: Vec<&str> = a.journeys.iter().map(|j| j.id.as_str()).collect();
+    assert_eq!(ids, ["j:web-src-app-ts-main", "j:api-main-py-health", "j:nightly-cleanup"], "the same journeys, whether the scout ran inside discovery or before it");
+    assert_eq!(a.journeys[1].why, "Operators poll it.");
+    // a scout that cannot run is an error the person sees
+    let err = discovery::propose_flows(&g, &base, &Options::default(), &|_: &AgentCall, _: &(dyn Fn(AgentEvent) + Sync)| -> anyhow::Result<(Value, f64)> { anyhow::bail!("cannot start claude") }, &|_| {}).unwrap_err();
+    assert!(err.to_string().contains("cannot start claude"), "{err}");
+}
+
+#[test]
+fn a_start_is_matched_to_the_code_however_it_is_written() {
+    let g = fixture();
+    let traces = terrarium_core::query::traces(&g);
+    let at = |s: &str| {
+        let (entry, t, how) = discovery::resolve_start(&g, &traces, s, "");
+        (entry, t.map(|t| t.entry_path), how)
+    };
+    assert_eq!(at("web/src/app.ts#main"), ("web/src/app.ts#main".into(), Some("web/src/app.ts#main".into()), "trace"));
+    assert_eq!(at("web/src/app.ts"), ("web/src/app.ts#main".into(), Some("web/src/app.ts#main".into()), "file"));
+    assert_eq!(at("GET /api/users/{id}").2, "none", "routes are matched as the scanner spells them");
+    assert_eq!(at("GET /api/users/*"), ("web/src/api.ts#fetchUser".into(), Some("web/src/api.ts#fetchUser".into()), "endpoint"), "a route is followed from its caller");
+    assert_eq!(at("scan_repo").2, "endpoint", "a bare word is an IPC command");
+    assert_eq!(at("http /api/health"), ("api/main.py#health".into(), None, "endpoint"));
+    assert_eq!(at("worker/store/store.go"), ("worker/store/store.go".into(), None, "file"));
+    assert_eq!(at("api/main.py#health"), ("api/main.py#health".into(), None, "symbol"));
+    assert_eq!(at("Nightly cleanup"), (String::new(), None, "none"));
+    // the scout's trace wins over its start
+    let (entry, _, how) = discovery::resolve_start(&g, &traces, "somewhere else", "native/src/lib.rs#run");
+    assert_eq!((entry.as_str(), how), ("native/src/lib.rs#run", "trace"));
 }
 
 #[test]

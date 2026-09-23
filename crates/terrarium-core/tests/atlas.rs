@@ -97,6 +97,36 @@ fn journeys_follow_the_traces_across_components() {
 }
 
 #[test]
+fn the_engine_ranks_traces_for_where_they_start_and_what_they_add() {
+    let g = fixture();
+    let find = |p: &str| g.find_by_path(p).unwrap().id;
+    // starts a person would recognise
+    assert_eq!(atlas::entry_kind(&g, find("web/src/app.ts#main")), Some("main"));
+    assert_eq!(atlas::entry_kind(&g, find("api/main.py#get_users")), Some("route"));
+    assert_eq!(atlas::entry_kind(&g, find("native/src/commands.rs#scan_repo")), Some("command"));
+    assert_eq!(atlas::entry_kind(&g, find("web/src/api.ts#fetchUser")), None);
+    let traces = terrarium_core::query::traces(&g);
+    let entries = |ts: &[terrarium_core::query::Trace]| ts.iter().map(|t| t.entry_path.clone()).collect::<Vec<_>>();
+    // the fixture's three traces keep the order length gave them: each starts somewhere new or crosses something new
+    assert_eq!(entries(&atlas::rank_traces(&g, &traces, 5)), ["web/src/app.ts#main", "native/src/lib.rs#run", "web/src/api.ts#fetchUser"]);
+    // a near copy of the longest trace (same packages, same boundaries, from the same web app) is longer
+    // than the other two but shows nothing new, so it falls behind them
+    let mut copy = traces[0].clone();
+    copy.entry = find("web/src/api.ts#fetchUser");
+    copy.entry_path = "web/src/app.ts#copy".into();
+    copy.hops += 1;
+    let mut with_copy = vec![traces[0].clone(), copy];
+    with_copy.extend(traces[1..].iter().cloned());
+    assert_eq!(entries(&atlas::rank_traces(&g, &with_copy, 3)), ["web/src/app.ts#main", "native/src/lib.rs#run", "web/src/api.ts#fetchUser"]);
+    assert_eq!(entries(&atlas::rank_traces(&g, &with_copy, 4))[3], "web/src/app.ts#copy");
+    // a recognisable start beats a longer trace that starts nowhere in particular
+    let mut plain = traces[0].clone();
+    plain.entry = find("web/src/api.ts#fetchUser");
+    plain.entry_path = "web/src/app.ts#plain".into();
+    assert_eq!(entries(&atlas::rank_traces(&g, &[plain, traces[0].clone()], 1)), ["web/src/app.ts#main"]);
+}
+
+#[test]
 fn a_journey_projects_onto_every_level_and_tallies_with_the_boxes() {
     let g = fixture();
     let a = atlas::engine_atlas(&g);

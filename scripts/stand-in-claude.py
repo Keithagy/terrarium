@@ -72,6 +72,21 @@ def survey(prompt):
     }
 
 
+def scout(prompt):
+    """Propose the first two traces listed, a route nothing calls (if any), and one
+    flow with no start, which the narrator must find in the code."""
+    if os.path.exists("README.md"):
+        read("README.md")
+    entries = re.findall(r"^- (\S+#\S+) \(\d+ boundaries", prompt, re.M)
+    packages_ = re.findall(r"^- .+ \(package `([^`]+)`", prompt, re.M)
+    idle = re.findall(r"^- ((?:http|ipc|queue) \S+) \(no-callers\)", prompt, re.M)
+    flows = [{"name": f"Follow {e.split('#')[-1]} to the end", "why": "The scanner follows it across the most boundaries.", "start": e, "containers": packages_[:1], "trace": e} for e in entries[:2]]
+    if idle:
+        flows.append({"name": f"Serve {idle[0]}", "why": "Something outside this repository calls it.", "start": idle[0], "containers": [], "trace": ""})
+    flows.append({"name": "Nightly cleanup", "why": "A stand-in guesses a job the scanner cannot see.", "start": "", "containers": packages_[-1:], "trace": ""})
+    return {"flows": flows}
+
+
 def container(prompt):
     files = listed_files(prompt)
     for f in files:
@@ -119,6 +134,8 @@ def main():
     emit({"type": "system", "subtype": "init", "model": arg("--model", "stand-in")})
     if prompt.startswith("You are surveying"):
         answer = survey(prompt)
+    elif prompt.startswith("You are scouting"):
+        answer = scout(prompt)
     elif prompt.startswith("You are describing one container"):
         answer = container(prompt)
     elif prompt.startswith("You are narrating"):

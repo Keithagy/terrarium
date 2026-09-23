@@ -4,12 +4,16 @@
 
 import { api, log, on } from "./tauri";
 import { store, subscribe, emit, freshDiscovery, setAtlas, setLevel, elementName, type AgentState, type Note } from "./store";
-import type { Atlas, DiscoveryRun, FlowRequest, NarrateDone, Progress } from "./types";
+import type { Atlas, DiscoveryRun, FlowRequest, NarrateDone, Progress, Proposal, ProposeDone } from "./types";
 import { esc, toast } from "./panels";
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T;
 
 let ticker = 0;
+/** Container agents in the running discovery, for recounting the total once the scout answers. */
+let fieldContainers = 0;
+/** Whether the running discovery has a scout; it has none when the person chose the flows. */
+let scouting = true;
 
 export function initDiscovery(): void {
   $("#discover-btn").addEventListener("click", () => openPlan());
@@ -68,29 +72,84 @@ interface PlanRow {
   entry: string;
   name: string;
   note: string;
+  /** Why the scout proposed it; empty for a flow the person added or the atlas already had. */
+  why: string;
   on: boolean;
 }
 
 let plan: PlanRow[] = [];
+/** The scout at work for the plan sheet: what it is reading now. */
+let proposing: { on: boolean; current: string | null } = { on: false, current: null };
 
 function initPlan(): void {
   $("#plan-cancel").addEventListener("click", () => { $("#plan").hidden = true; emit("ui"); });
   $("#plan").addEventListener("click", (e) => { if (e.target === $("#plan")) { $("#plan").hidden = true; emit("ui"); } });
   $("#plan-add").addEventListener("click", () => addPlanRow());
   $("#plan-new-name").addEventListener("keydown", (e) => { if (e.key === "Enter") addPlanRow(); });
+  $("#plan-propose").addEventListener("click", () => {
+    if (proposing.on || store.discovery.running) return;
+    log("info", "proposing flows");
+    // the propose:* events drive the sheet; the promise only reports that the call went out
+    api.proposeFlows().catch((e) => log("warn", `propose failed: ${String(e)}`));
+  });
   $("#plan-run").addEventListener("click", () => {
-    const flows: FlowRequest[] = plan.filter((r) => r.on && (r.entry || r.name.trim())).map((r) => ({ entry: r.entry, name: r.name.trim(), note: r.note.trim() }));
+    const flows: FlowRequest[] = plan.filter((r) => r.on && (r.entry || r.name.trim())).map((r) => ({ entry: r.entry, name: r.name.trim(), note: r.note.trim(), why: r.why }));
     $("#plan").hidden = true;
     emit("ui");
     log("info", "discovery planned", { flows: flows.length });
     void runDiscovery(flows);
   });
+  void on<Record<string, never>>("propose:started", () => { proposing = { on: true, current: null }; renderProposing(); });
+  void on<Progress>("propose:progress", (p) => {
+    if (p.event === "agent_activity") { proposing.current = p.kind === "reading" ? p.path ?? null : `searching ${p.query ?? ""}`.trim(); renderProposing(); }
+  });
+  void on<ProposeDone>("propose:done", (v) => {
+    proposing = { on: false, current: null };
+    fillPlan(v.proposals);
+    renderProposing();
+    toast(v.proposals.length ? `Claude proposed ${v.proposals.length} key ${v.proposals.length === 1 ? "flow" : "flows"} for $${v.run.cost_usd.toFixed(2)}` : "Claude proposed no flows; the scanner's traces stand", v.proposals.length ? "ok" : "info", 5000);
+    log("info", "flows proposed", { flows: v.proposals.length, cost_usd: v.run.cost_usd });
+  });
+  void on<{ error: string }>("propose:error", (e) => {
+    proposing = { on: false, current: null };
+    renderProposing();
+    toast(`Proposing flows failed: ${e.error}`, "error", 7000);
+  });
+}
+
+/** The scout's proposals become ticked rows at the top; rows it did not propose stay below as they were. */
+function fillPlan(proposals: Proposal[]): void {
+  const same = (r: PlanRow, p: Proposal) => (p.entry && r.entry === p.entry) || r.name.trim().toLowerCase() === p.name.toLowerCase();
+  const rows: PlanRow[] = proposals.map((p) => {
+    const had = plan.find((r) => same(r, p));
+    return { entry: p.entry, name: had?.name.trim() || p.name, note: had?.note ?? "", why: p.why, on: true };
+  });
+  const rest = plan.filter((r) => !proposals.some((p) => same(r, p)));
+  plan = [...rows, ...rest];
+  if (!$("#plan").hidden) renderPlan();
+}
+
+function renderProposing(): void {
+  const b = $<HTMLButtonElement>("#plan-propose");
+  b.disabled = proposing.on || store.discovery.running;
+  b.innerHTML = proposing.on ? `<span class="spinner is-small"></span> Scouting…` : "Propose with Claude";
+  // one agent at a time: the backend refuses a discovery while the scout runs
+  $<HTMLButtonElement>("#plan-run").disabled = proposing.on;
+  const s = $("#plan-proposing");
+  s.hidden = !proposing.on;
+  s.textContent = proposing.on ? (proposing.current ? `reading ${proposing.current}` : "reading where flows begin") : "";
+  emit("ui");
+}
+
+/** What the plan sheet shows, for the bridge's `/ui`. */
+export function planSnapshot(): { open: boolean; proposing: boolean; rows: { name: string; entry: string; why: string; on: boolean }[] } {
+  return { open: !$("#plan").hidden, proposing: proposing.on, rows: plan.map((r) => ({ name: r.name, entry: r.entry, why: r.why, on: r.on })) };
 }
 
 function addPlanRow(): void {
   const name = $<HTMLInputElement>("#plan-new-name").value.trim();
   if (!name) return;
-  plan.push({ entry: "", name, note: $<HTMLInputElement>("#plan-new-note").value.trim(), on: true });
+  plan.push({ entry: "", name, note: $<HTMLInputElement>("#plan-new-note").value.trim(), why: "", on: true });
   $<HTMLInputElement>("#plan-new-name").value = "";
   $<HTMLInputElement>("#plan-new-note").value = "";
   renderPlan();
@@ -101,8 +160,9 @@ export function openPlan(): void {
   if (store.discovery.running || !store.graphLoaded) return;
   const a = store.atlas;
   if (!a) return;
-  plan = a.journeys.map((j) => ({ entry: j.entry, name: j.source === "engine" ? "" : j.name, note: j.note ?? "", on: j.source !== "engine" }));
+  plan = a.journeys.map((j) => ({ entry: j.entry, name: j.source === "engine" ? "" : j.name, note: j.note ?? "", why: j.why ?? "", on: j.source !== "engine" }));
   renderPlan();
+  renderProposing();
   $("#plan").hidden = false;
   emit("ui");
 }
@@ -115,7 +175,8 @@ function renderPlan(): void {
       <div class="plan-fields">
         <input type="text" data-i="${i}" data-field="name" data-testid="plan-flow-${i + 1}-name" value="${esc(r.name)}" placeholder="${esc(r.entry ? `What the user is doing (from ${r.entry})` : "What the user is doing")}" />
         <input type="text" data-i="${i}" data-field="note" data-testid="plan-flow-${i + 1}-note" value="${esc(r.note)}" placeholder="Note for the narrator (optional)" />
-        ${r.entry ? `<span class="plan-entry mono">${esc(r.entry)}</span>` : `<span class="plan-entry">no trace: the narrator finds it in the code</span>`}
+        ${r.why ? `<span class="plan-why" data-testid="plan-flow-${i + 1}-why" title="Why the scout proposed it">${esc(r.why)}</span>` : ""}
+        ${r.entry ? `<span class="plan-entry mono">${esc(r.entry)}</span>` : `<span class="plan-entry">no start in the code yet: the narrator finds it</span>`}
       </div>
       <button class="ghost is-round" data-remove="${i}" title="Remove">×</button>
     </li>`).join("");
@@ -135,7 +196,7 @@ function renderPlan(): void {
 
 function renderPlanSummary(): void {
   const n = plan.filter((r) => r.on && (r.entry || r.name.trim())).length;
-  $("#plan-summary").textContent = n ? `${n} ${n === 1 ? "journey" : "journeys"} chosen by you` : "the surveyor will pick the journeys";
+  $("#plan-summary").textContent = n ? `${n} ${n === 1 ? "journey" : "journeys"} chosen by you` : "the scout will propose the journeys";
 }
 
 export async function resetAtlas(): Promise<void> {
@@ -172,6 +233,7 @@ function note(kind: Note["kind"], text: string): void {
 
 const STAGE_WORDS: Record<string, string> = {
   survey: "Surveying: what the system is, who uses it, what it talks to",
+  scout: "Scouting: which flows show what the system does, including the ones the scanner cannot trace",
   field: "In the field: one agent per container and per journey, reading the code",
   editor: "Editing: the summary, where to start, what to know",
   verify: "Checking every relationship against the code",
@@ -201,8 +263,16 @@ function onProgress(p: Progress): void {
   switch (p.event) {
     case "started":
       d.model = p.model;
-      d.total = 1 + p.containers + p.journeys + 1;
-      note("stage", `Discovery started on ${p.model}: a surveyor, ${p.containers} container ${p.containers === 1 ? "agent" : "agents"}, ${p.journeys} journey ${p.journeys === 1 ? "narrator" : "narrators"} and an editor.`);
+      fieldContainers = p.containers;
+      scouting = p.scout;
+      d.total = 1 + (p.scout ? 1 : 0) + p.containers + p.journeys + 1;
+      note("stage", `Discovery started on ${p.model}: a surveyor, ${p.scout ? `a scout, ${p.containers} container ${p.containers === 1 ? "agent" : "agents"}, up to ${p.journeys}` : `${p.containers} container ${p.containers === 1 ? "agent" : "agents"}, ${p.journeys}`} journey ${p.journeys === 1 ? "narrator" : "narrators"} and an editor.`);
+      break;
+    case "proposed":
+      // the scout may propose fewer flows than the most it was allowed
+      d.total = 1 + 1 + fieldContainers + p.flows.length + 1;
+      note("found", `The scout proposed ${p.flows.length} key ${p.flows.length === 1 ? "flow" : "flows"}.`);
+      for (const f of p.flows) note("found", `“${f.name}”${f.why ? `: ${f.why}` : ""} ${f.entry ? `Starts at ${f.entry}.` : "The narrator finds where it starts."}`);
       break;
     case "stage":
       d.stage = p.stage;
@@ -338,7 +408,7 @@ function renderNotesHead(): void {
   head.innerHTML = `<div class="notes-kicker">${d.running ? `<span class="pulse"></span>Discovering` : d.error ? "Discovery failed" : "Discovered"}${d.model ? ` on ${esc(d.model)}` : ""}</div><h2>${d.running ? `${d.done} of ${d.total || "?"} agents done` : d.error ? "Stopped" : "Field notes"}</h2><div class="notes-meta">${elapsed} · $${d.cost_usd.toFixed(2)}</div>`;
 }
 
-const STAGES: [string, string][] = [["survey", "Survey"], ["field", "Field"], ["editor", "Editor"], ["verify", "Check"]];
+const STAGES: [string, string][] = [["survey", "Survey"], ["scout", "Scout"], ["field", "Field"], ["editor", "Editor"], ["verify", "Check"]];
 
 function renderNotes(): void {
   const panel = $("#notes");
@@ -348,8 +418,9 @@ function renderNotes(): void {
   document.body.classList.toggle("has-notes", open);
   if (!open) return;
   renderNotesHead();
-  const stageIdx = STAGES.findIndex(([k]) => k === d.stage);
-  $("#notes-stages").innerHTML = STAGES.map(([k, label], i) => `<span class="stage${i < stageIdx || (!d.running && !d.error && d.stage) ? " is-done" : ""}${i === stageIdx && d.running ? " is-current" : ""}" data-testid="stage-${k}">${label}</span>`).join(`<span class="stage-sep"></span>`);
+  const stages = STAGES.filter(([k]) => k !== "scout" || scouting);
+  const stageIdx = stages.findIndex(([k]) => k === d.stage);
+  $("#notes-stages").innerHTML = stages.map(([k, label], i) => `<span class="stage${i < stageIdx || (!d.running && !d.error && d.stage) ? " is-done" : ""}${i === stageIdx && d.running ? " is-current" : ""}" data-testid="stage-${k}">${label}</span>`).join(`<span class="stage-sep"></span>`);
   const agents = $("#notes-agents");
   agents.innerHTML = d.agents.map((a) => `
     <li class="agent ${a.done ? (a.ok ? "is-ok" : "is-fail") : "is-busy"}" data-testid="agent-${esc(a.key)}">

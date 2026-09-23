@@ -162,6 +162,9 @@ pub struct Journey {
     /// What the person steering the atlas asked for, if anything; narrators read it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// Why this journey is worth seeing, as the scout put it when it proposed the flow.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
 }
 
 /// One arrow on the sequence diagram.
@@ -682,10 +685,74 @@ fn engine_summary(g: &Graph, containers: &[Container]) -> String {
     )
 }
 
-/// The engine's journeys: the longest traces, with captions made from the graph.
+/// The engine's journeys: the traces [`rank_traces`] puts first, with captions made from the graph.
 pub fn engine_journeys(g: &Graph, atlas: &Atlas, limit: usize) -> Vec<Journey> {
     let traces = query::traces(g);
-    traces.iter().take(limit).filter_map(|t| engine_journey(atlas, t)).collect()
+    rank_traces(g, &traces, limit).iter().filter_map(|t| engine_journey(atlas, t)).collect()
+}
+
+/// What kind of place a node is to start a flow from, when a person would
+/// recognise it as one: a route handler, an IPC command, a `main`, or a UI action.
+pub fn entry_kind(g: &Graph, id: NodeId) -> Option<&'static str> {
+    let n = g.node(id);
+    let has = |t: &str| n.tags.iter().any(|x| x == t);
+    if has("http-server") {
+        return Some("route");
+    }
+    if has("ipc-server") {
+        return Some("command");
+    }
+    let file = n.path.split('#').next().unwrap_or(&n.path);
+    if matches!(n.name.as_str(), "main" | "__main__") || (n.kind == NodeKind::File && matches!(stem(file), "main" | "__main__")) {
+        return Some("main");
+    }
+    if matches!(n.lang, Lang::TypeScript | Lang::JavaScript) && is_ui_action(&n.name) {
+        return Some("ui action");
+    }
+    None
+}
+
+/// `onClick`, `handleSubmit`, `submitForm`: names a UI gives to what a person does.
+fn is_ui_action(name: &str) -> bool {
+    let short = name.rsplit(['.', ':']).next().unwrap_or(name);
+    let after = |p: &str| short.strip_prefix(p).and_then(|r| r.chars().next()).is_some_and(|c| c.is_ascii_uppercase() || c == '_');
+    let lower = short.to_lowercase();
+    after("on") || after("handle") || ["click", "submit", "press"].iter().any(|w| lower.contains(w))
+}
+
+/// The traces worth showing first, best first. Each pick is the trace that adds
+/// the most to what is already picked: a start a person would recognise
+/// ([`entry_kind`]), an entry in a package no pick starts in yet, boundaries not
+/// yet crossed, packages not yet reached. Length only breaks ties, so a near copy
+/// of a picked trace falls behind a short flow that starts somewhere new.
+pub fn rank_traces(g: &Graph, traces: &[query::Trace], limit: usize) -> Vec<query::Trace> {
+    let mut left: Vec<usize> = (0..traces.len()).collect();
+    let mut via: HashSet<String> = HashSet::new();
+    let mut lanes: HashSet<String> = HashSet::new();
+    let mut starts: HashSet<String> = HashSet::new();
+    let mut out: Vec<query::Trace> = Vec::new();
+    let start_lane = |t: &query::Trace| t.steps.first().map(|s| s.lane.clone()).unwrap_or_default();
+    while out.len() < limit && !left.is_empty() {
+        let gain = |t: &query::Trace| -> u32 {
+            let known = if entry_kind(g, t.entry).is_some() { 6 } else { 0 };
+            let new_start = if starts.contains(&start_lane(t)) { 0 } else { 5 };
+            let new_via = t.via.iter().filter(|v| !via.contains(*v)).count() as u32;
+            let new_lanes = t.lanes.iter().filter(|l| !lanes.contains(*l)).count() as u32;
+            known + new_start + 4 * new_via + 2 * new_lanes
+        };
+        let pos = (0..left.len())
+            .max_by(|&x, &y| {
+                let (a, b) = (&traces[left[x]], &traces[left[y]]);
+                gain(a).cmp(&gain(b)).then(a.hops.cmp(&b.hops)).then(a.langs.len().cmp(&b.langs.len())).then(a.steps.len().cmp(&b.steps.len())).then(left[y].cmp(&left[x]))
+            })
+            .unwrap_or(0);
+        let t = &traces[left.remove(pos)];
+        starts.insert(start_lane(t));
+        via.extend(t.via.iter().cloned());
+        lanes.extend(t.lanes.iter().cloned());
+        out.push(t.clone());
+    }
+    out
 }
 
 pub fn journey_id(entry: &str, name: &str) -> String {
@@ -707,6 +774,7 @@ pub fn engine_journey(atlas: &Atlas, t: &query::Trace) -> Option<Journey> {
         steps: vec![],
         source: "engine".into(),
         note: String::new(),
+        why: String::new(),
     };
     j.steps = steps_of(&j.messages);
     Some(j)

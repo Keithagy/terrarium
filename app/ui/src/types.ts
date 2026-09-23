@@ -151,6 +151,8 @@ export interface Journey {
   steps: JourneyStep[];
   source: Author | "";
   note?: string;
+  /** Why the journey is worth seeing, as the scout put it. */
+  why?: string;
 }
 
 /** A flow the person asks the narrators to follow. */
@@ -158,7 +160,22 @@ export interface FlowRequest {
   entry: string;
   name: string;
   note: string;
+  why?: string;
 }
+
+/** A key flow the scout proposed, matched to the code: crates/terrarium-core/src/discovery.rs `Proposal`. */
+export interface Proposal {
+  name: string;
+  why: string;
+  start: string;
+  /** Where the narrator starts; empty when it must find the start in the code. */
+  entry: string;
+  matched: "trace" | "symbol" | "endpoint" | "file" | "none";
+  hops: number;
+  containers: string[];
+}
+
+export type ProposeDone = { proposals: Proposal[]; run: DiscoveryRun };
 
 export interface Pointer {
   element: string;
@@ -223,12 +240,13 @@ export interface CacheEntry {
 // ---- discovery progress: crates/terrarium-core/src/discovery.rs -----------------
 
 export type Progress =
-  | { event: "started"; model: string; containers: number; journeys: number }
-  | { event: "stage"; stage: "survey" | "field" | "editor" | "verify" }
+  | { event: "started"; model: string; containers: number; journeys: number; scout: boolean }
+  | { event: "stage"; stage: "survey" | "scout" | "field" | "editor" | "verify" }
   | { event: "agent_started"; role: string; target: string | null; name: string }
   | { event: "agent_activity"; role: string; target: string | null; kind: "reading" | "searching"; path?: string; query?: string }
   | { event: "agent_done"; role: string; target: string | null; ok: boolean; cost_usd: number; secs: number; error: string | null }
   | { event: "survey_done"; system: System; people: Person[]; externals: External[]; containers: Container[] }
+  | { event: "proposed"; flows: Proposal[] }
   | { event: "container_done"; container: Container }
   | { event: "journey_done"; journey: Journey }
   | { event: "verified"; atlas: Atlas };

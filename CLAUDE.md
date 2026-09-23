@@ -15,5 +15,7 @@ Vite/TypeScript UI. macOS only.
   that list (`atlas::project` in Rust, `project` in `app/ui/src/store.ts`). Keep the two in
   step: the map's numbers and the sequence view must agree with the boxes.
 - Agent prompts and schemas live in `crates/terrarium-core/src/discovery.rs`; `scripts/stand-in-claude.py`
-  parses those prompts, so keep its role detection in step when the opening words change.
+  parses those prompts, so keep its role detection in step when the opening words change. The roles
+  open with "You are surveying", "You are scouting", "You are describing one container",
+  "You are narrating" and "You are editing".
 - Never run a real discovery in tests or `verify.sh`; it spends money. Use the stand-in.

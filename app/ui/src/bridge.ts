@@ -8,6 +8,7 @@ import type { Actions } from "./panels";
 import { jumpTo, playJourney } from "./panels";
 import { exportSvg, fit } from "./atlas";
 import { sequenceSnapshot } from "./sequence";
+import { planSnapshot } from "./discovery";
 
 interface BridgeRequest {
   id: number;
@@ -185,6 +186,7 @@ export function uiSnapshot(): Record<string, unknown> {
     card: card && !card.hidden ? { title: card.querySelector("[data-testid=card-title]")?.textContent?.trim(), chips: [...card.querySelectorAll(".chip")].map((c) => c.textContent) } : null,
     diagram: diagram ? { nodes: [...diagram.querySelectorAll<SVGGElement>("g.node")].map((g) => ({ id: g.dataset.id, title: g.querySelector(".c4-title")?.textContent, state: g.dataset.state || undefined, dim: g.classList.contains("is-dim") || undefined })), edges: [...diagram.querySelectorAll<SVGGElement>("g.edge")].map((g) => ({ from: g.dataset.from, to: g.dataset.to, source: [...g.classList].find((c) => c.startsWith("is-") && ["is-code", "is-survey", "is-claimed"].includes(c))?.slice(3), journey: g.classList.contains("is-journey") || undefined })) } : null,
     sequence: sequenceSnapshot() ?? undefined,
+    plan: planSnapshot(),
     notes: store.notesOpen ? store.discovery.notes.slice(-30).map((n) => n.text) : undefined,
     toasts,
     elements,
