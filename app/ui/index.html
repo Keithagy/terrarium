@@ -15,7 +15,7 @@
       <div class="header-actions">
         <button id="notes-btn" class="ghost" data-testid="notes" title="What the agents found, as they found it" hidden>Field notes</button>
         <button id="dsl-btn" class="ghost" data-testid="copy-dsl" title="Copy the atlas as Structurizr DSL">Copy DSL</button>
-        <button id="discover-btn" class="primary" data-testid="discover-claude" title="A surveyor, one agent per container and per journey, and an editor read the code and name every part; the engine checks every relationship">Discover with Claude</button>
+        <button id="discover-btn" class="primary" data-testid="discover-claude" title="A surveyor names the parts, a scout picks the key flows, one agent per container and per flow reads the code, an editor writes the guide; the engine checks every arrow. Steer the flows from the Journeys tab.">Discover with Claude</button>
         <button id="help-btn" class="ghost is-round" data-testid="help" title="Keyboard shortcuts">?</button>
       </div>
     </header>
@@ -126,15 +126,15 @@
 
     <div id="plan" class="overlay is-sheet" data-testid="plan-overlay" hidden>
       <div class="sheet is-wide" data-testid="plan">
-        <h2>Discover with Claude</h2>
-        <p class="hint">A surveyor reads the manifests and entry points, a scout picks the key flows, one agent per container groups its code into components, one narrator per journey writes its sequence diagram, and an editor writes the guide. The engine checks every arrow. This spends money.</p>
+        <h2>Steer the next discovery</h2>
+        <p class="hint">A plain run lets the scout pick the key flows. Here you choose them instead: keep what it found, add what it missed, and leave a note for each narrator. The rest of the run (survey, containers, editor, check) is the same. This spends money.</p>
         <div class="plan-section">
           <div class="plan-head">
             <div class="group-title">Journeys to narrate</div>
             <span id="plan-proposing" class="meta plan-proposing" data-testid="plan-proposing" hidden></span>
             <button class="ghost" id="plan-propose" data-testid="plan-propose" title="One scout agent reads where flows begin and proposes the key ones; nothing else runs (spends a little)">Propose with Claude</button>
           </div>
-          <p class="meta plan-hint">Tick the flows you care about, name them by what the user is doing, and leave a note for the narrator. Propose with Claude to start from the scout's picks, or leave everything unticked and the scout chooses during the run.</p>
+          <p class="meta plan-hint">Tick the flows you care about, name them by what the user is doing, and leave a note for the narrator. Propose with Claude asks the scout for fresh picks without running everything else.</p>
           <ul id="plan-flows" class="plan-flows" data-testid="plan-flows"></ul>
           <div class="plan-new">
             <input id="plan-new-name" data-testid="plan-new-name" type="text" placeholder="Another flow, by name: “Sign up and get a welcome email”" />

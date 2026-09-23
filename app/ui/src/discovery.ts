@@ -16,7 +16,8 @@ let fieldContainers = 0;
 let scouting = true;
 
 export function initDiscovery(): void {
-  $("#discover-btn").addEventListener("click", () => openPlan());
+  // One click, one run: the scout picks the key flows on the way. Steering is for afterwards.
+  $("#discover-btn").addEventListener("click", () => void runDiscovery());
   $("#notes-close").addEventListener("click", () => { store.notesOpen = false; emit("discovery"); emit("ui"); });
   $("#notes-btn").addEventListener("click", () => { store.notesOpen = !store.notesOpen; emit("discovery"); emit("ui"); });
   initPlan();
@@ -271,6 +272,7 @@ function onProgress(p: Progress): void {
     case "proposed":
       // the scout may propose fewer flows than the most it was allowed
       d.total = 1 + 1 + fieldContainers + p.flows.length + 1;
+      d.proposed = p.flows;
       note("found", `The scout proposed ${p.flows.length} key ${p.flows.length === 1 ? "flow" : "flows"}.`);
       for (const f of p.flows) note("found", `“${f.name}”${f.why ? `: ${f.why}` : ""} ${f.entry ? `Starts at ${f.entry}.` : "The narrator finds where it starts."}`);
       break;

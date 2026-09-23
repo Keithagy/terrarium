@@ -5,6 +5,7 @@ import { api, log } from "./tauri";
 import { store, subscribe, emit, select, selectRelationship, setLevel, setJourney, setJourneyStep, setView, startDraft, currentProjection, journeyLength, zoomInto, elementById, elementName, shownContainers, containerOf, relationshipsOf, relKey, componentOfFile, type ShelfTab } from "./store";
 import { EXTERNAL_LABEL, KIND_LABEL, langOf, type Journey, type Relationship } from "./types";
 import { newJourney } from "./sequence";
+import { openPlan } from "./discovery";
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T;
 
@@ -35,7 +36,7 @@ export function initPanels(a: Actions): void {
   subscribe("level", () => { renderMap(); });
   subscribe("selection", () => { renderCard(); renderMap(); });
   subscribe("journey", () => { renderJourneys(); renderJourneyBar(); });
-  subscribe("discovery", () => { renderCard(); });
+  subscribe("discovery", () => { renderCard(); renderJourneys(); });
   subscribe("repo", () => { renderChips(); renderOverlays(); });
   subscribe("ui", () => { renderChips(); renderOverlays(); renderBridge(); });
   renderOverlays();
@@ -249,10 +250,21 @@ function renderJourneys(): void {
   if (!a) return;
   const head = document.createElement("div");
   head.className = "journeys-head";
-  head.innerHTML = `<span class="meta">${a.journeys.length ? `${a.journeys.length} ${a.journeys.length === 1 ? "journey" : "journeys"}` : "No journeys yet"}</span><button class="ghost" data-testid="journey-new" title="Write a journey of your own: pick the elements, add the arrows">+ New journey</button>`;
+  const d = store.discovery;
+  head.innerHTML = `<span class="meta">${a.journeys.length ? `${a.journeys.length} ${a.journeys.length === 1 ? "journey" : "journeys"}` : "No journeys yet"}</span><span class="journeys-actions"><button class="ghost" data-testid="journey-steer" title="Choose the flows for the next discovery, with a note for each narrator" ${d.running ? "disabled" : ""}>Steer…</button><button class="ghost" data-testid="journey-new" title="Write a journey of your own: pick the elements, add the arrows">+ New journey</button></span>`;
   head.querySelector("[data-testid=journey-new]")!.addEventListener("click", () => { setShelfTab("journeys"); newJourney(); });
+  head.querySelector("[data-testid=journey-steer]")!.addEventListener("click", () => openPlan());
   el.appendChild(head);
-  if (!a.journeys.length) { el.insertAdjacentHTML("beforeend", `<p class="empty-note">No journey crosses a boundary yet. Journeys follow a call from an entry point across every language it touches; you can also write one by hand.</p>`); return; }
+  // The scout's picks, while the narrators are still writing them.
+  const pending = d.running ? d.proposed.filter((f) => !a.journeys.some((j) => (f.entry && j.entry === f.entry) || j.name === f.name)) : [];
+  for (const f of pending) {
+    const row = document.createElement("div");
+    row.className = "journey-row is-pending";
+    row.dataset.testid = `journey-pending-${slugOf(f.name)}`;
+    row.innerHTML = `<span class="jr-top"><span class="name">${esc(f.name)}</span><span class="spinner is-small"></span><span class="meta">being narrated</span></span>${f.why ? `<span class="jr-why">${esc(f.why)}</span>` : ""}<span class="jr-langs"><span class="jr-entry">${esc(f.entry || "no trace: the narrator finds where it starts")}</span></span>`;
+    el.appendChild(row);
+  }
+  if (!a.journeys.length && !pending.length) { el.insertAdjacentHTML("beforeend", `<p class="empty-note">${a.source === "engine" ? "No journey crosses a boundary yet. Discover with Claude to have a scout find the key flows, or write one by hand." : "No journeys yet. Steer the next discovery, or write one by hand."}</p>`); return; }
   for (const j of a.journeys) {
     const b = document.createElement("button");
     b.className = `journey-row${store.journey?.id === j.id ? " is-selected" : ""}`;
@@ -261,7 +273,7 @@ function renderJourneys(): void {
     const claimed = j.messages.filter((m) => m.source === "claimed").length;
     const who = j.source === "user" ? `<span class="chip is-user">yours</span>` : j.source === "claude" ? `<span class="chip is-claude">Claude</span>` : "";
     const busy = store.narrating === j.id ? `<span class="spinner is-small"></span>` : "";
-    b.innerHTML = `<span class="jr-top"><span class="name">${esc(j.name)}</span>${busy}${who}<span class="meta">${j.messages.length} ${j.messages.length === 1 ? "message" : "messages"}${claimed ? ` · <span class="is-claimed-text">${claimed} claimed</span>` : ""}</span></span><span class="jr-summary">${esc(j.summary)}</span><span class="jr-langs">${langs.map((l) => `<span class="dot" data-lang="${l}"></span>`).join("")}<span class="jr-entry">${esc(j.entry || (j.note ? `✎ ${j.note}` : j.source === "user" ? "written by hand" : "no trace: followed in the code"))}</span><span class="jr-open" data-testid="journey-${j.id}-sequence" title="Open as a sequence diagram">sequence ›</span></span>`;
+    b.innerHTML = `<span class="jr-top"><span class="name">${esc(j.name)}</span>${busy}${who}<span class="meta">${j.messages.length} ${j.messages.length === 1 ? "message" : "messages"}${claimed ? ` · <span class="is-claimed-text">${claimed} claimed</span>` : ""}</span></span>${j.why ? `<span class="jr-why" title="Why the scout picked it">${esc(j.why)}</span>` : ""}<span class="jr-summary">${esc(j.summary)}</span><span class="jr-langs">${langs.map((l) => `<span class="dot" data-lang="${l}"></span>`).join("")}<span class="jr-entry">${esc(j.entry || (j.note ? `✎ ${j.note}` : j.source === "user" ? "written by hand" : "no trace: followed in the code"))}</span><span class="jr-open" data-testid="journey-${j.id}-sequence" title="Open as a sequence diagram">sequence ›</span></span>`;
     b.querySelector(".jr-open")!.addEventListener("click", (e) => { e.stopPropagation(); playJourney(j, 0, "sequence"); });
     b.addEventListener("click", () => { if (store.journey?.id === j.id && !store.draft) setJourney(null); else playJourney(j); });
     el.appendChild(b);
@@ -488,6 +500,10 @@ export function toggleHelp(force?: boolean): void {
 }
 
 // ---- utils ------------------------------------------------------------------
+
+function slugOf(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "x";
+}
 
 export function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);

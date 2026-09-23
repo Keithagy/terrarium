@@ -1,7 +1,7 @@
 // Single source of truth for the UI. The diagram and the panels subscribe to it;
 // the bridge reads it to answer `/state`.
 
-import type { Atlas, Component, Container, Journey, Message, Relationship, Stats } from "./types";
+import type { Atlas, Component, Container, Journey, Message, Proposal, Relationship, Stats } from "./types";
 
 /** The C4 levels. `code` is one component's files. */
 export type Level = "context" | "containers" | "components" | "code";
@@ -42,6 +42,8 @@ export interface DiscoveryState {
   notes: Note[];
   /** Files agents have opened, by container id. */
   reads: Map<string, string[]>;
+  /** The key flows the scout proposed this run; the journeys tab shows them while the narrators work. */
+  proposed: Proposal[];
   error: string | null;
 }
 
@@ -77,7 +79,7 @@ export interface Store {
 }
 
 export function freshDiscovery(): DiscoveryState {
-  return { running: false, model: "", stage: null, startedAt: 0, finishedAt: null, total: 0, done: 0, cost_usd: 0, agents: [], notes: [], reads: new Map(), error: null };
+  return { running: false, model: "", stage: null, startedAt: 0, finishedAt: null, total: 0, done: 0, cost_usd: 0, agents: [], notes: [], reads: new Map(), proposed: [], error: null };
 }
 
 export const store: Store = {

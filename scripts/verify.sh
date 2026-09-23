@@ -126,8 +126,9 @@ expect "journey claimed" "pings,claimed" "$T" app journey "j:mine" --sequence
 expect "journey delete" "deleted: \"?j:mine" "$T" app journey-delete j:mine
 "$T" app reset > /dev/null
 
-step "plan sheet: the scout proposes, the person steers (stand-in claude)"
-expect "plan open" "clicked: discover-claude" "$T" app click discover-claude
+step "steering: the plan sheet from the journeys tab (stand-in claude)"
+expect "journeys tab" "clicked: tab-journeys" "$T" app click tab-journeys
+expect "plan open" "clicked: journey-steer" "$T" app click journey-steer
 expect "plan ui" "plan-propose" "$T" app ui
 expect "plan propose" "clicked: plan-propose" "$T" app click plan-propose
 expect_soon "plan proposed" "Nightly cleanup,\"\",A stand-in guesses .*,true" "$T" app ui
@@ -141,6 +142,7 @@ expect "plan cancel" "clicked: plan-cancel" "$T" app click plan-cancel
 step "discover in the app (stand-in claude)"
 expect "app discover" "backed: 2[0-9]" "$T" app discover
 expect "discovered" "discovered by" "$T" app ui
+expect "journeys why" "journey-\"?j:nightly-cleanup" "$T" app ui
 expect "notes" "Field notes" "$T" app ui
 expect "notes scout" "stage-scout" "$T" app ui
 expect "notes scout agent" "agent-scout" "$T" app ui

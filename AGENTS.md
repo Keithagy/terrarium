@@ -87,10 +87,14 @@ reason in `why`. Without agents, the engine ranks traces the same way: a recogni
 start (route handler, IPC command, `main`, UI action) first, then whatever adds a new
 starting package or new boundaries, with length only breaking ties.
 
-Steering: `terrarium propose` (or Propose with Claude in the plan sheet) runs the scout
-alone, so a person starts from its picks. `--flow` chooses what the narrators follow (an
-entry the scanner traced, a name the narrator must find in the code, or `name @ entry`)
-with a note each; in the app the Discover button opens a plan sheet first. Editing: the
+Steering: a plain `discover` (or the Discover button) runs at once and comes back with the
+scout's flows narrated; steering is for afterwards. `terrarium propose` (or Propose with
+Claude in the plan sheet) runs the scout alone, so a person starts from its picks.
+`--flow` chooses what the narrators follow (an entry the scanner traced, a name the
+narrator must find in the code, or `name @ entry`) with a note each; in the app, Steer…
+in the Journeys tab (`journey-steer`) opens the plan sheet, pre-filled with the flows the
+atlas has. While a run is on, the Journeys tab lists the scout's picks as pending rows
+(`journey-pending-<slug>`) until each narrator lands. Editing: the
 sequence view's Edit drawer changes messages by hand (arrows are picked from the atlas's
 elements), and Narrate again sends one narrator with a note.
 
